@@ -1,16 +1,18 @@
+#__________________________________________________________________________________________________________________________________
 
-# BOOKMARKS
-# 1. set parameters & load data
-# xxx
+# Add description of what code does here...
+#__________________________________________________________________________________________________________________________________
+
+warning('Are there any numeric vars that I need to normalise/scale for any models?')
 
 #__________________________________________________________________________________________________________________________________
 
-#0. set parameters & load data
+# 0. Set parameters and load data ----
 #__________________________________________________________________________________________________________________________________
 
-#===============
+#+++++++++++++++++
 # set params & load data
-#===============
+#+++++++++++++++++
 
 rm(list=ls())
 set.seed(1)
@@ -18,12 +20,11 @@ dataset <- 'full'
 basePath <- 'E:/JAY/'
 pathData <- paste0(basePath, 'data/')
 pathSave <- paste0(basePath, 'AirNZ segmentation results/')
-downsampleFactor <- 100000 # for models, how many more nonconvs than convs should there be at a maximum? [Note that there has already been some downsampling in EDA&CreateModelDatabase.r; see nonconvDownsampling param below]
 responseVar <- 'lastClickConversion' # 'Conversion' or 'lastClickConversion'. Former is whether a user converted at any point over model period; latter is whether a given ad was attributed a covnersion via last click methodology. lastClickConv only applies to outputDatabase==df_oneRowPerAdAndLastClickConversionResponse
 
 # Define which types of ads we want to look at     ***CURRENTLY ONLY IMPLEMENTED FOR df_oneRowPerAdAndLastClickConversionResponse ***
 offerAds <- 'allRoutes' # 'focalRoute', 'allRoutes' # e.g. if routeAds==focalRoute, then for route==TAS we would only include ads that have a 'Tasman sale' message in the model
-layerAds <- 'allRoutes' # 'notRemarketing', 'Remarketing', or 'all'. If 'notRemarketing' then exclude RMK ads from model.
+layerAds <- 'all' # 'notRemarketing', 'Remarketing', or 'all'. If 'notRemarketing' then exclude RMK ads from model.
 groupAds <- 'all' # 'retail', 'brand', or 'all'. Az reckons we would only ever use the model to buy retail ads (i.e. ads relating to specific sales), but including other options for completeness.
 
 # Add in params used to read in data & poss name outputs - need to match names in EDA&CreateModelDatabase.r:
@@ -51,9 +52,9 @@ library(partykit) # improved trees (vs party, which is used by caret)
 library(parallel)
 library(doParallel)
 
-#===============
+#+++++++++++++++++
 # Modify vars for modelling
-#===============
+#+++++++++++++++++
 
 if(outputDatabase=='df_oneRowPerAdAndLastClickConversionResponse'){
   df$Converter <- df[,which(grepl('lastClickConversion', colnames(df)))]
@@ -64,9 +65,15 @@ df$Converter <- as.factor(ifelse(df$Converter==1, 'y', 'n')); cat(' Changing con
 df <- select(df, -user_id)
 df$DBMRegion <- gsub('-', '', df$DBMRegion) # 'Manawatu-Wanganui' hyphen caused probs in models.
 
-#===============
+# Convert any character vars to factors - can cause problems for random forest otherwise
+df$DBMRegion <- as.factor(df$DBMRegion)
+df$day <- as.factor(df$day)
+df$daypart <- as.factor(df$daypart)
+cat('  NB make sure any new character vars are converted to factors to avoid potential errors with random forest\n')
+
+#+++++++++++++++++
 # Define variable groups - makes it easy to quickly include/exclude vars from models
-#===============
+#+++++++++++++++++
 
 adCatVars <- colnames(df)[grepl('adX_', colnames(df))] 
 urlVars <- colnames(df)[grepl('url_', colnames(df))] 
@@ -79,9 +86,9 @@ timeVars <- c('daypart', 'day')
 
 # ==> subsequent code will be like this 'modelDF <- select(df, which(colnames(df) %in% c(responseVar, adCatVars, regionVars)))'
 
-#===============
+#+++++++++++++++++
 # check for and remove NAs
-#===============
+#+++++++++++++++++
 
 naRows <- nrow(filter(df, is.na(DBMRegion)))
 if(naRows >0){
@@ -89,9 +96,9 @@ if(naRows >0){
   df <- na.omit(df)
 }
 
-#__________________________________________________________________________________________________________________________________
+#_______________________________________________________________________________________________________________________________________________________________
 
-#1. Based on values for ad attributes in parameters, either include or exclude individual ads from analysis, then do any additional downsampling 
+# 1. Based on values for ad attributes in parameters, either include or exclude individual ads from analysis ----
 #__________________________________________________________________________________________________________________________________
 
 if(outputDatabase=='df_oneRowPerAdAndLastClickConversionResponse'){
@@ -133,53 +140,29 @@ if(outputDatabase=='df_oneRowPerAdAndLastClickConversionResponse'){
              '  - Number of negative instances before / after ad removal: ', dfNegativeInstancesPreAdRemoval, ' / ', dfNegativeInstancesPostAdRemoval, '\n'))
   }
 
-#===============
-# additional downsampling to ensure no. of nonconvs is only x times more than no. of convs
-#===============
-
-set.seed(1203)
-numNonconvs <- length(df$Converter[df$Converter=='n'])   # NOT DOING FOR NOW - EASIER NOT TO FOR NOW COS EASIER TO BACK-CALCULATE NUM USERS IN DATABASE
-numConvs <- length(df$Converter[df$Converter=='y'])
-if(numNonconvs/numConvs>downsampleFactor){
-  df <- bind_rows(filter(df, Converter=='y'),
-                    sample_n(filter(df, Converter=='n'), size=numConvs*downsampleFactor))
-} else {df <- df}
-cat(paste0('  - Number of positive / negative instances after final downsampling: ', nrow(filter(df, Converter=='y')), ' / ', nrow(filter(df, Converter=='n')), '\n'))
 
 #__________________________________________________________________________________________________________________________________
 
-#2. Some preliminary modelling - use caret's varImp function to find single predictors that are important
+# 2. Some quick EDA - plot & model bivariate relationships between predictors and response ----
 #__________________________________________________________________________________________________________________________________
 
-# i.e. looks at each predictor's total effect, c.f. marginal effect, using model-specific metrics
+plotDF <- mutate(df, ConverterNumeric=ifelse(Converter=='y', 1, 0))
+windows()
+ggplot(plotDF, aes(daypart, ConverterNumeric)) + geom_jitter(alpha=0.5) + stat_summary(fun.data="mean_cl_boot", colour = "red", size = 0.75)
+graphics.off()
+x <- glm(Converter~daypart, data=df, family='binomial')
+summary(x)
+
+
+
+#__________________________________________________________________________________________________________________________________
+
+# 3. Preliminary modelling - run major model types on all predictors, using caret's default hyperparam test values and caret's downsampling to balance sample, then compare performance ----
+#__________________________________________________________________________________________________________________________________
+
+modelDF <- select(df, which(colnames(df) %in% c('Converter', adCatVars, regionVars, timeVars))) # , deviceVars, timeVars)))
 
 set.seed(1)
-
-#===============
-# First, remove vars I definitely don't want to predict with, then recreate dummy vars as required
-#===============
-
-modelDF <- select(df, which(colnames(df) %in% c('Converter', adCatVars, regionVars, timeVars))) # , deviceVars, timeVars))) # just look at region and ad cat to start with
-
-# Dummify factors
-modelDF$Converter <- as.character(modelDF$Converter) # get warning about Converter not being a factor as part of dummification otherwise - easier to just treat as character and change back to factor below
-modelDFDummified <- dummyVars('Converter ~ .', data=modelDF, fullRank=TRUE) # caret's dummyVars ignores numeric columns automatically. FullRank excludes 1 level of each factor (becoming intercept), same as model.matrix. Should always do this, otherwise can get perfectly correlated vars.
-modelDFDummified <- as.data.frame(predict(modelDFDummified, newdata=modelDF)) # need to do this to convert back to a dataframe
-modelDFDummified$Converter <- as.factor(modelDF$Converter) # have to manually add back in
-modelDF$Converter <- as.factor(modelDF$Converter) # ..and manually chnage back to factor
-
-# #===============
-# # some quick EDA for individual vars
-# #===============
-# 
-# plotDF <- mutate(modelDF, ConverterNumeric=ifelse(Converter=='y', 1, 0))
-# ggplot(plotDF, aes(daypart, ConverterNumeric)) + geom_jitter(alpha=0.5) + stat_summary(fun.data="mean_cl_boot", colour = "red", size = 2)
-# x <- glm(Converter~daypart, data=modelDF, family='binomial')
-# summary(x)
-
-#===============
-# run models
-#===============
 
 # Set up parallel backend
 cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
@@ -189,59 +172,43 @@ getDoParWorkers() # check how many cores are getting used
 # Set up training control
 control <- trainControl(method="repeatedcv", number=5, repeats=3,
                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
-                        classProbs=TRUE)
+                        classProbs=TRUE,
+                        sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
 
-# Run a few models using caret defaults
-mGlmnet <- train(Converter~., data=modelDFDummified, method="glmnet", trControl=control, metric='ROC')
-mSVM <- train(Converter~., data=modelDFDummified, method="svmLinear", trControl=control, metric='ROC')
-mLR <- train(Converter~., data=modelDFDummified, method="glm", family='binomial', trControl=control, metric='ROC')
-mCTree <- train(Converter~., data=modelDFDummified, method="ctree", trControl=control, metric='ROC')
-mRTree <- train(Converter~., data=modelDFDummified, method="rpart", trControl=control, metric='ROC')
-mRF <- train(Converter~., data=modelDFDummified, method="rf", trControl=control, metric='ROC') # NB recommnedation for mtry param is mtry=floor(sqrt(ncol(x))) or mtry=7, see http://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
+#+++++++++++++++++
+# run models using caret defaults
+#+++++++++++++++++
 
-# plot(varImp(mGlmnet), top=10)
-# plot(varImp(mLR), top=10)
-# plot(varImp(mSVM), top=10) 
-# plot(varImp(mCTree), top=10)
-# plot(varImp(mRF), top=10) # all give quite differnt results... eek
-# graphics.off()
+mGlmnet <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
+mSVMLinear <- train(Converter~., data=modelDF, method="svmLinear", trControl=control, metric='ROC')
+mSVMRadial <- train(Converter~., data=modelDF, method="svmRadial", trControl=control, metric='ROC')
+mLR <- train(Converter~., data=modelDF, method="glm", family='binomial', trControl=control, metric='ROC')
+mCTree <- train(Converter~., data=modelDF, method="ctree", trControl=control, metric='ROC')
+# mRTree <- train(Converter~., data=modelDF, method="rpart", trControl=control, metric='ROC')
+mRF <- train(Converter~., data=modelDF, method="rf", trControl=control, metric='ROC') # NB recommnedation for mtry param is mtry=floor(sqrt(ncol(x))) or mtry=7, see http://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
 
-# While I'm here, compare predictive performance of these models
-AUCs <- resamples(list(Glmnet = mGlmnet, SVMLinear = mSVM, LogReg = mLR, RF=mRF, Ctree=mCTree, Rtree=mRTree))
+#+++++++++++++++++++
+# Compare predictive performance
+#+++++++++++++++++++
+
+AUCs <- resamples(list(Glmnet = mGlmnet, SVMLinear = mSVMLinear, SVMRadial=mSVMRadial, LogReg = mLR, RF=mRF, Ctree=mCTree))
 windows()
 bwplot(AUCs) # log reg pretty good; glment slightly better
 graphics.off()
 
+cat('  WARNING - if using best predictor set from random forest RFE on other models this will result in overly optimistic performance, cos the model training doesnt know that the features were selected - see http://stats.stackexchange.com/questions/60734/caret-rfe-variable-selection-and-test-prediction\n')
+
+
 
 #__________________________________________________________________________________________________________________________________
 
-#3. Compare major models for predicting conv prob using AUC
-#__________________________________________________________________________________________________________________________________
+# # 4. Feature selection methods -  try use GLMnet with ridge vs lasso vs blend, modifying alpha/lambda params to get different degrees of feature selection, then pick simplest model within 1se of best ----
+# #__________________________________________________________________________________________________________________________________
 
-# # i.e SVMs for GLMs vs lasso vs trees vs NB etc etc. Just to see how well trees stack up.
-# 
-# set.seed(1)
-# 
-# #===============
-# # First, remove vars I definitely don't want to predict with, then recreate dummy vars as required
-# #===============
-# 
-# modelDF <- select(df, which(colnames(df) %in% c('Converter', adCatVars, regionVars, deviceVars, timeVars))) # just look at region and ad cat to start with
-# 
-# # plotDF <- mutate(modelDF, ConverterNumeric=ifelse(Converter=='y', 1, 0))
-# # library('Hmisc')
-# # ggplot(plotDF, aes(daypart, ConverterNumeric)) + geom_jitter(alpha=0.5) + stat_summary(fun.data="mean_cl_boot", colour = "red", size = 2)
-# # x <- glm(Converter~daypart, data=modelDF, family='binomial')
-# # summary(x)
-# 
-# # Dummify factors, as per code above
-# modelDFDummified <- dummyVars('Converter ~ .', data=modelDF, fullRank=TRUE) # caret's dummyVars ignores numeric columns automatically. FullRank excludes 1 level of each factor (becoming intercept), same as model.matrix. Should always do this, otherwise can get perfectly correlated vars.
-# modelDFDummified <- as.data.frame(predict(modelDFDummified, newdata=modelDF)) # need to do this to convert back to a dataframe
-# modelDFDummified$Converter <- modelDF$Converter # have to manually add back in
-# 
-#===============
-# Run some models
-#===============
+### For info on the '1se rule' see here https://sebastianraschka.com/blog/2016/model-evaluation-selection-part3.html
+
+modelDF <- select(df, which(colnames(df) %in% c('Converter', adCatVars, regionVars, timeVars))) # , deviceVars, timeVars)))
+set.seed(1203)
 
 # Set up parallel backend
 cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
@@ -249,129 +216,355 @@ registerDoParallel(cl)
 getDoParWorkers() # check how many cores are getting used
 
 # Set up training control
-control <- trainControl(method="repeatedcv", number=3, repeats=3, 
+control <- trainControl(method="repeatedcv", number=5, repeats=5,
                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
-                        classProbs=TRUE)  
+                        classProbs=TRUE,
+                        sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
 
-# # Run a few models to compare
-# mGlmnet <- train(Converter~., data=modelDFDummified, method="glmnet", trControl=control, metric='ROC')
-# mSVM_linear <- train(Converter~., data=modelDFDummified, method="svmLinear", trControl=control, metric='ROC')
-# mSVM_Poly <- train(Converter~., data=modelDFDummified, method="svmPoly", trControl=control, metric='ROC')
-# mSVM_Radial <- train(Converter~., data=modelDFDummified, method="svmRadial", trControl=control, metric='ROC')
-# mLR <- train(Converter~., data=modelDFDummified, method="glm", family='binomial', trControl=control, metric='ROC')
-# mNB <- train(Converter~., data=modelDFDummified, method="nb", trControl=control, metric='ROC') # looks like caret doesnt automatically tune NB hyperparams (type 'mNB' into console for details) - so good to use tuneGrid here. 
-# detach("package:klaR", unload=TRUE)
-# detach("package:MASS", unload=TRUE) # these packages mask dplyr's select() 
-mCTree <- train(Converter~., data=modelDFDummified, method="ctree", trControl=control, metric='ROC')
-mCTree2 <- train(Converter~., data=modelDFDummified, method="ctree2", trControl=control, metric='ROC',
-                 tuneGrid=expand.grid(maxdepth = seq(50, 50,5),  # setting maxdepth at a single value for now
-                                      mincriterion=c(0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.99))) # try manually tuning hyperparams
+#+++++++++++++++++
+# run models using caret defaults, then delve into accessing the different lambda/ alpha values
+#+++++++++++++++++
 
-# # For rpart, annoyingly won't accept 'Converter ~.' formula. Need to specify all vars manually:     # ctree always performs better anyway...
-# manForm <- formula(paste('Converter ~', paste(colnames(select(modelDFDummified, -Converter)), collapse=' + ')))
-# mRTree <- train(manForm, data=modelDFDummified, method="rpart", trControl=control, metric='ROC')
-# mRTree2 <- train(manForm, data=modelDFDummified, method="rpart2", trControl=control, metric='ROC')
-# manForm_noDummies <- formula(paste('Converter ~', paste(colnames(select(modelDF, -Converter)), collapse=' + ')))
-# mRTree_noDummies <- train(manForm_noDummies, data=modelDF, method="rpart", trControl=control, metric='ROC')
-# mRTree2_noDummies <- train(manForm_noDummies, data=modelDF, method="rpart2", trControl=control, metric='ROC') # seeing if inputting factors (ie single DBMregion var) rather than dummy vars (AucklandYN, WellingtonYN etc) improves performance or changes interpretation
+mGlmnet <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
 
-# # Compare predictive performance of these models
-# AUCs <- resamples(list(Glmnet=mGlmnet, SVMLinear=mSVM_linear, SVMPoly=mSVM_Poly, SVMRadial=mSVM_Radial, LogReg=mLR, NB=mNB, CTree=mCTree,CTree2=mCTree2, CTree_noDummies=mCTree_noDummies,CTree2_noDummies=mCTree2_noDummies, RTree=mRTree, RTree2=mRTree2, RTree_noDummies=mRTree_noDummies, RTree2_noDummies=mRTree2_noDummies))
-# windows()
-# bwplot(AUCs)
-# graphics.off()
-
-#__________________________________________________________________________________________________________________________________
-
-#4. Delve deeper into classification trees
-#__________________________________________________________________________________________________________________________________
-
-# Use code above to check that classification trees perform ok, compared with other methods. Below, try tuning hyperparams manually to get better performance, then find the best tree and plot it.
-
-# NEED TO READ IN CODE ABOVE TO CREATE MODELLING DATABASES
-
-#===============
-# Tune hyperparameters better
-#===============
-
-#EDIT - NOT DOING THIS YET.... looking at caret's plots of hyperparam values vs AUC, diff values make almost no difference to AUC. So not a priority to optimise just yet.
-
-# See hyperparams that can easily be tuned (NB according to this post, there are other params but caret only tunes the most important one http://stats.stackexchange.com/questions/168269/which-parameters-to-tune-in-cart)
-# mRTree # cp, with caret trying 0.004, 0.01, and 0.02. Plot shows values <0.004 could have higher AUC
-# mRTree2 # maxdepth, with caret trying 4, 5, & 9. Plot shows values <9 could have higher AUC
-mCTree # mincriterion, with caret trying 0.01, 0.5, & 0.99. Plot shows values <0.01 could have higher AUC
-mCTree2 # maxdepth & mincriterion, with caret trying combinations of 15, 20, 25...50 & 0.5, 0.95 & 0.99. Plot shows values <0.05 could have higher AUC, and no's <15 OR >50 could too.
-mCTree2$finalModel
-# ==> look at plots and see at which end of distribution the values could be expanded.
-
+# Look at lambda and alpha values chosen by train function:
+mGlmnet
+mGlmnet$bestTune$lambda; mGlmnet$bestTune$alpha # extract best hyperparam values from cross validation grid
+windows()
+plot(mGlmnet)
 graphics.off()
 
-cat('NB I think trees can also have a parameter set that defines minimum no. of observations in a terminal node. Could be useful for planners to e.g. say "only define segments with >100 users" or similar\n')
+# final model is then fitted on all data, based on best alpha above BUT new lambda sequence then gets automatically generated by glmnet:
+mGlmnet$finalModel$lambda # new sequence of lambdas, but can ignore these and just predict based on 
+mGlmnet$finalModel$tuneValue$alpha
+mGlmnet$finalModel$tuneValue$lambda # optimal values from train function
+mGlmnet$finalModel$lambdaOpt # can also get best lambda from train() this way
 
-#===============
-# Create segments based on best model
-#===============
+#+++++++++++++++++++
+# Retrain model using expanded training grid
+#+++++++++++++++++++
 
-# TRY partykit c.f. party, and mob() for lmtree & glmtree stuff
-# And good explanation of rpart vs ctree here http://stats.stackexchange.com/questions/22035/party-vs-rpart-vs-for-partitioning-trees-in-r
+# extend tuning grid beyond values selected by caret default - use mix of caret defaults & glmnet defauts
+lambda_combinedRange <- c(min(mGlmnet$results$lambda), max(mGlmnet$results$lambda), # lambda range selected by caret train function
+                          min(mGlmnet$finalModel$lambda), max(mGlmnet$finalModel$lambda)) # new lambda range selected by glmnet after model is fitted to new data.
 
-fancyRpartPlot(mRTree$finalModel)
-fancyRpartPlot(mRTree2$finalModel)
-# fancyRpartPlot(mCTree$finalModel) # doesn't work
+tGrid <- expand.grid(alpha=1, # wanting feature selection, so set alpha=1
+                     lambda=seq(from=min(lambda_combinedRange), to=max(lambda_combinedRange), length.out=10))
 
-# Redo ctree with partykit package - newer, better implementation, with better plotting options
-mCTree_PK <- partykit::ctree(Converter~., data=modelDF, mincriterion=0.5)# , maxdepth=50)
+# Set up parallel backend
+cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
+registerDoParallel(cl)
+getDoParWorkers() # check how many cores are getting used
 
-mCTree_PK
-mCTree_PK2 <- partykit::ctree(Converter~., data=modelDFDummified, maxdepth=50, mincriterion=0.75)
-mCTree_PK2
+# Set up training control
+control <- trainControl(method="repeatedcv", number=5, repeats=5,
+                        summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
+                        classProbs=TRUE,
+                        sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
 
-mCTree2
-mCTree
+# Rerun model
+mGlmnet2 <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC', tuneGrid=tGrid)
+
+#+++++++++++++++++++
+# Explore resampling results and look at model that needs fewest predictors while also being within 1se of best performing model
+#+++++++++++++++++++
+
+# ==> note that when lambda controls strength of penalty and therefore no. of predictors that get shrunk to zero:
+numCoeffsList <- list()
+for(i in 1:length(tGrid$lambda)){
+  lambda_i <- tGrid$lambda[i]
+  numCoeffsList[[i]] <- data.frame(lambda=lambda_i, 
+                                   numPreds=length(coef(mGlmnet2$finalModel, s=lambda_i)[coef(mGlmnet2$finalModel, s=lambda_i)!=0]))
+}
+numCoeffsDF <- bind_rows(numCoeffsList)
+numCoeffsDF
+windows()
+ggplot(numCoeffsDF, aes(lambda, numPreds)) + geom_line(colour='purple')
+graphics.off()
+
+# explore best model using native caret plots
+windows()
+plot(mGlmnet2)
+graphics.off()
+
+# Use ggplot to add in se's & find model with fewest predictors that is still <1se from best model
+inputModel <- mGlmnet2
+seDF <- inputModel$results %>%
+  mutate(rocSE_low = ROC-ROCSD/sqrt(inputModel$control$number*inputModel$control$repeats),
+         rocSE_high = ROC+(ROCSD/sqrt(inputModel$control$number*inputModel$control$repeats)), # calculate std errors of resamples; see http://stats.stackexchange.com/questions/206139/is-there-a-way-to-return-the-standard-error-of-cross-validation-predictions-usin
+         modelPerformance='other')
+seDF$modelPerformance[which(seDF$ROC==max(seDF$ROC))] <- 'best'
+seDF$within1seVec <- ifelse(seDF$rocSE_high>=max(seDF$ROC) & seDF$modelPerformance!='best', 'y', 'n')
+seDF$modelPerformance[which(seDF$lambda==max(seDF$lambda[seDF$within1seVec=='y']))] <- 'fewestPredsWithin1se'
+
+windows()
+ggplot(seDF, aes(lambda, ROC, colour=modelPerformance)) + geom_point(size=2) + 
+  geom_errorbar(aes(ymin=rocSE_low, ymax=rocSE_high), width=0) + ggtitle('ROC +/- 1se')
+graphics.off()
+
+===== TEMPORARY BOOKMARK =====
+  
+# find biggest lambda (i.e. fewest predictors) within 1se
+
+# Calculate no. of predictors in each model
+seDF$numPreds <- NULL
+seDF[1, 'numPreds'] <- 1
+
+control_finalModel <- trainControl(method="none", classProbs=TRUE, sampling='down')
+mGlmnet_i <- train(Converter~., data=modelDF, method="glmnet", trControl=control_finalModel, 
+                   tuneGrid=expand.grid(alpha=inputModel$bestTune$alpha, lambda=inputModel$bestTune$lambda))
+
+coef(mGlmnet_i$finalModel, s=mGlmnet_i$bestTune$lambda)
+coef(inputModel$finalModel, s=inputModel$bestTune$lambda)
+str(mGlmnet2)
+
+
+  ggplot(aes(x = C)) +
+  geom_line(aes(y = Accuracy)) +
+  geom_point(aes(y = Accuracy)) +
+  scale_x_log10() + #correct spacing of the cost parameter
+  ylim(0.65, 0.8) + #set correct y-axis
+  geom_errorbar(aes(ymin=accuracySD_low, ymax=accuracySD_high), 
+                colour="gray50",
+                width=.1) +
+  labs(title="Estimates of prediction accuracy\nwith 2 SD errror bars")
+
+str(mGlmnet2)
+
+
+
+mGlmnet$finalModel$lambdaOpt %in% mGlmnet$finalModel$lambda
+mGlmnet$finalModel$alphaOpt
+mGlmnet$bestTune$lamdbaOpt
+
+
+coef(mGlmnet$finalModel, s=)
+mGlmnet$bestTune
+mGlmnet
+plot(mGlmnet)
+
+#__________________________________________________________________________________________________________________________________
+
+# # 4.Feature selection methods - test performance of random forest with feature selection [*** Hashing out - this is just a placeholder; can do later if I want to explore RF's further ----
+#__________________________________________________________________________________________________________________________________
+
+# See answer here for a good starting point. http://stats.stackexchange.com/questions/200823/does-it-makes-sense-to-use-feature-selection-before-random-forest. This answer says that feature selection with RF may be a good idea if lasso outperforms ridge.
+
+# Also keep in mind that, for purporse of keeping no. of features to a minimum, can use 1se rule - ie choose simplest model that produces performance metric within 1se of best-performing model.
+
+
+#__________________________________________________________________________________________________________________________________
+
+# # 4. Feature selection methods -  try recursive feature elimination on a random forest model & bagged tree model to look at which vars I should include [*** Hashing out - takes ages, and I can return to this later if needs be ***] ----
+# #__________________________________________________________________________________________________________________________________
+
+# cat('  Running recursive feature elimination to get an idea of best vars to include - this can take a while, particularly if no downsampling\n')
+# 
+# #+++++++++++++++++
+# # First, remove vars I definitely don't want to predict with, then recreate dummy vars as required
+# #+++++++++++++++++
+# 
+# modelDF <- select(df, which(colnames(df) %in% c('Converter', adCatVars, regionVars, timeVars))) # , deviceVars, timeVars))) # just look at region and ad cat to start with
+# 
+# # # Dummify factors - actually not needed, at least for the methods I'm curretnly using
+# # modelDF$Converter <- as.character(modelDF$Converter) # get warning about Converter not being a factor as part of dummification otherwise - easier to just treat as character and change back to factor below
+# # modelDFDummified <- dummyVars('Converter ~ .', data=modelDF, fullRank=TRUE) # caret's dummyVars ignores numeric columns automatically. FullRank excludes 1 level of each factor (becoming intercept), same as model.matrix. Should always do this, otherwise can get perfectly correlated vars.
+# # modelDFDummified <- as.data.frame(predict(modelDFDummified, newdata=modelDF)) # need to do this to convert back to a dataframe
+# # modelDFDummified$Converter <- as.factor(modelDF$Converter) # have to manually add back in
+# # modelDF$Converter <- as.factor(modelDF$Converter) # ..and manually chnage back to factor
+# 
+# # Downsample, to (1) make rfe function run faster, and (2) avoid issues with model fitting to unbalanced sample (rfe function uses accuracy, which can't be changed, and cant downsample function internally) 
+# modelDF_ds <- bind_rows(filter(modelDF, Converter=='y'), 
+#                         sample_n(filter(modelDF, Converter=='n'), 
+#                                  size=1*length(modelDF$Converter[modelDF$Converter=='y']))) 
+# 
+# #+++++++++++++++++++
+# # Recursive feature elimination for a random forest & bagged trees             # see for details https://topepo.github.io/caret/recursive-feature-elimination.html
+# #+++++++++++++++++++
+# 
+# # ==> doing mulitple methods to test robustness of included vars. RF and TB are best available default methods (can also define own, but it's a pain).
+#  
+# subsets <- c(1:5, seq(10, ncol(modelDF)-1, 5)) # different no. of vars to try
+# 
+# set.seed(0803)
+# cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
+# registerDoParallel(cl)
+# getDoParWorkers() # check how many cores are getting used
+# ctrl <- rfeControl(functions = rfFuncs, method = "repeatedcv", repeats = 10) # apparently different seeds can produce variable var selections, so good to use lots of repeats to reduce this variance
+# rfProfile <- rfe(x=as.data.frame(select(modelDF_ds, -Converter)), y=modelDF_ds$Converter, sizes = subsets, rfeControl = ctrl)
+# 
+# set.seed(0803)
+# cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
+# registerDoParallel(cl)
+# getDoParWorkers() # check how many cores are getting used
+# ctrl <- rfeControl(functions = treebagFuncs, method = "repeatedcv", repeats = 10)
+# btProfile <- rfe(x=as.data.frame(select(modelDF_ds, -Converter)), y=modelDF_ds$Converter, sizes = subsets, rfeControl = ctrl)
+# 
+# # visualise how performance changes with no. of predictors
+# windows()
+# plot(rfProfile, type = c("g", "o"))
+# plot(btProfile, type = c("g", "o"))
+# graphics.off()
+# 
+# # Look at relative importance of each var
+# varImp(rfProfile)
+# varImp(btProfile)
+# 
+# # Look at consistency of results across the two methods 
+# rfPredsDF <- data.frame(preds=predictors(rfProfile), RFmodel='y')
+# btPredsDF <- data.frame(preds=predictors(btProfile), BTmodel='y')
+# allPredsDF <- data.frame(preds=colnames(select(modelDF, -Converter)), AllData='y')
+# tempDF <- merge(rfPredsDF, btPredsDF, by='preds', all=TRUE)
+# mergedDF <- merge(allPredsDF, tempDF, by='preds', all=TRUE)
+# mergedDF
+# 
+# bestRFPreds <- predictors(rfProfile) # if I want to use this for subsequent models. 
+# cat('  WARNING - if using best predictor set from random forest RFE on other models this will result in overly optimistic performance, cos the model training doesnt know that the features were selected - see http://stats.stackexchange.com/questions/60734/caret-rfe-variable-selection-and-test-prediction\n')
+# 
+# #+++++++++++++++++++
+# # Use elastic net's inbuilt var selection and compare this method
+# #+++++++++++++++++++
+# 
+# control <- trainControl(method="repeatedcv", number=5, repeats=5,
+#                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
+#                         classProbs=TRUE,
+#                         sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
+# 
+# # Run a few models using caret defaults
+# mGlmnet <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
+# glmnetCoefs <- coef(mGlmnet$finalModel, s=mGlmnet$bestTune$lambda)
+# glmSelectedCoefs <- labels(glmnetCoefs)[[1]][which(glmnetCoefs!=0)]
+# glmSelectedCoefs <- glmSelectedCoefs[!grepl('Intercept', glmSelectedCoefs)]
+# glmnetPredsDF <- data.frame(preds=glmSelectedCoefs, Glmnetmodel='y')
+# 
+# # Look at most important glmnet vars
+# varImp(mGlmnet)
+# 
+# # Compare vars that made it into RF vs BT vs GLMNET models
+# merge(mergedDF, glmnetPredsDF, by='preds', all=TRUE)
+# warning('  glmnet dummifies factors, so there will be unmatched categories here just because e.g. RF will call them "Region" and glmnet will call them "RegionGisborne". Could always dummify factors prior to modelling, then should be more comparable.\n')
+
+
+
+
+#__________________________________________________________________________________________________________________________________
+
+# # 5. For major model classes that appear to work well, try different downsampling regimes [*** Hashing out - takes ages, and I can return to this later if needs be ***]----
+# #__________________________________________________________________________________________________________________________________
+# 
+# # Set up parallel backend
+# cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
+# registerDoParallel(cl)
+# getDoParWorkers() # check how many cores are getting used
+# 
+# # Set up training control
+# control <- trainControl(method="repeatedcv", number=5, repeats=3,
+#                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
+#                         classProbs=TRUE,
+#                         sampling='down') # downsampling initially, but below update this to upsample, SMOTE, and ROSE. As per https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
+# 
+# #+++++++++++++++++++
+# # Run models
+# #+++++++++++++++++++
+# 
+# mGlmnet_ds <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
+# mCTree_ds <- train(Converter~., data=modelDF, method="ctree", trControl=control, metric='ROC')
+# # mRF_predSubset_ds <- train(Converter~., data=modelDF_predSubset, method="rf", trControl=control, metric='ROC') # using subset for RF, not for others cos they kind of do their own var selection. Subset may not have quite as good performance as full but it's more workable.
+# 
+# control$sampling <- 'up'
+# mGlmnet_us <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
+# mCTree_us <- train(Converter~., data=modelDF, method="ctree", trControl=control, metric='ROC')
+# # mRF_predSubset_us <- train(Converter~., data=modelDF_predSubset, method="rf", trControl=control, metric='ROC') # using subset for RF, not for others cos they kind of do their own var selection. Subset may not have quite as good performance as full but it's more workable.
+# 
+# control$sampling <- 'smote'
+# mGlmnet_smote <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
+# mCTree_smote <- train(Converter~., data=modelDF, method="ctree", trControl=control, metric='ROC')
+# # mRF_predSubset_smote <- train(Converter~., data=modelDF_predSubset, method="rf", trControl=control, metric='ROC') # using subset for RF, not for others cos they kind of do their own var selection. Subset may not have quite as good performance as full but it's more workable.
+# 
+# control$sampling <- 'rose'
+# mGlmnet_rose <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
+# mCTree_rose <- train(Converter~., data=modelDF, method="ctree", trControl=control, metric='ROC')
+# # mRF_predSubset_rose <- train(Converter~., data=modelDF_predSubset, method="rf", trControl=control, metric='ROC') # using subset for RF, not for others cos they kind of do their own var selection. Subset may not have quite as good performance as full but it's more workable.
+# 
+# control <- trainControl(method="repeatedcv", number=5, repeats=3, summaryFunction=twoClassSummary,	classProbs=TRUE) # respecifiying so that there's no sampling.
+# mGlmnet_none <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
+# mCTree_none <- train(Converter~., data=modelDF, method="ctree", trControl=control, metric='ROC')
+# # mRF_predSubset_none <- train(Converter~., data=modelDF_predSubset, method="rf", trControl=control, metric='ROC') # using subset for RF, not for others cos they kind of do their own var selection. Subset may not have quite as good performance as full but it's more workable.
+# 
+# #+++++++++++++++++++
+# # Compare predictive performance
+# #+++++++++++++++++++
+# 
+# AUCs <- resamples(list(Glmnet_ds = mGlmnet_ds, Ctree_ds=mCTree_ds, # RF_predSubset_ds=mRF_predSubset_ds, 
+#                        Glmnet_us = mGlmnet_us, Ctree_us=mCTree_us, # RF_predSubset_us=mRF_predSubset_us, 
+#                        Glmnet_rose = mGlmnet_rose, Ctree_rose=mCTree_rose, # RF_predSubset_rose=mRF_predSubset_rose, 
+#                        Glmnet_smote = mGlmnet_smote, Ctree_smote=mCTree_smote, # RF_predSubset_smote=mRF_predSubset_smote,
+#                        Glmnet_none = mGlmnet_none, Ctree_none=mCTree_none)) #, RF_predSubset_none=mRF_predSubset_none))
+# windows()
+# bwplot(AUCs) # log reg pretty good; glment slightly better
+# graphics.off()
+
+
+#__________________________________________________________________________________________________________________________________
+
+# 6. For final **tree** model, tabulate segment rules, lift, and CPA, to give to media buyers ----
+#__________________________________________________________________________________________________________________________________
+
+#+++++++++++++++++++
+# Rerun final model with partykit, after first potentially messing with mincriterion and maxdepth params to make a smaller tree for planners
+#+++++++++++++++++++
+
+set.seed(1)
+
+# Set up tuning grid 
+grid <- expand.grid(mincriterion=c(0.1, seq(0.5, 0.99, 0.05), 0.99), maxdepth=c(5, 10))
+
+# Set up training control
+control <- trainControl(method="repeatedcv", number=5, repeats=3,
+                        summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
+                        classProbs=TRUE,
+                        sampling='down') # downsampling initially, but below update this to upsample, SMOTE, and ROSE. As per https://topepo.github.io/caret/subsampli
+mCTree_ds <- train(Converter~., data=modelDF, method="ctree2", trControl=control, tuneGrid=grid, metric='ROC')
+
+windows()
+plot(mCTree_ds) # look at best tuning grid combinations
+graphics.off()
+
+# up/downsample as necessary, to match final caret tree, then run in partykit
+convsDF <- filter(modelDF, Converter=='y')
+nonconvsDF <- filter(modelDF, Converter=='n')
+modelDF_manualDownsample <- bind_rows(convsDF, sample_n(nonconvsDF, size=nrow(convsDF)))
+
+mCTree_PK <- partykit::ctree(Converter~., data=modelDF_manualDownsample, maxdepth=50, mincriterion=0.65)
+
+cat('  WARNING: for ctree outputs for planners Im running model through partykit cf using carets finalModel; means I can 
+   - 1 specify mincriterion/maxdepth parameters manually (cos best performing tree may be too complex for planners) and 
+   - 2 plot with partykits nice plotting methods.
+   - NB may mean model isnt quite identical to caret version
+   - NB If the best class-balancing method is SMOTE or ROSE I need to figure out how to do these outside of caret and apply before running model.\n')
+
+#+++++++++++++++++++
+# plot trees and save to file, if desired (but excel output below is better I think)
+#+++++++++++++++++++
+
+windows()
 plot(mCTree_PK, gp = gpar(fontsize = 6), simplifiy=TRUE)
-plot(mCTree_PK2, gp = gpar(fontsize = 6), simplifiy=TRUE)
-
-plot(mCTree$finalModel)
-summary(mCTree_PK)
-
-head(data_party(mCTree_PK, id=4))
-
-
-# # save some of these plots to file
+graphics.off()
+# # save plots to file
 # png(paste0(pathSave, 'exampleCTree1.png'), height=10000, width=10000, res=400)
 # plot(mCTree_PK, gp = gpar(fontsize = 6), simplifiy=TRUE)
 # graphics.off()
-# 
-# png(paste0(pathSave, 'exampleCTree2.png'), height=10000, width=10000, res=400)
-# plot(mCTree_PK2, gp = gpar(fontsize = 20), simplifiy=TRUE)
-# graphics.off()
-# 
-# png(paste0(pathSave, 'exampleRTree.png'), height=3000, width=3000, res=400)
-# fancyRpartPlot(mRTree$finalModel)
-# graphics.off()
-# 
-# png(paste0(pathSave, 'exampleRTree2.png'), height=3000, width=3000, res=400)
-# fancyRpartPlot(mRTree2$finalModel)
-# graphics.off()
-# 
 
-#__________________________________________________________________________________________________________________________________
-
-#5. Print out characteristics of trees, to give to media planners
-#__________________________________________________________________________________________________________________________________
-
-#===============
+#+++++++++++++++++
 # Use predicted values to get summary stats for each node/leaf 
-#===============
+#+++++++++++++++++
 
-treeModelToSummarise <- mCTree_PK2
+treeModelToSummarise <- mCTree_PK
 
 nodePredictions <- predict(treeModelToSummarise, type = "prob") # one row per instance, with row labels giving node and cell values giving prob of "y" and prob of "n"
-head(nodePredictions)
 nodeLabels <- labels(nodePredictions)[[1]]
 nodeProbLabels <- labels(nodePredictions)[[2]]
 nodePredictionsDF <- data.frame(node=nodeLabels, probYes=nodePredictions[,which(nodeProbLabels=='y')])
-nodePredictionsDF
 
 # Summarise conversion probabilities per node
 treeSummaryDF <- nodePredictionsDF %>%
@@ -390,37 +583,75 @@ treeSummaryDF[,colnames(treeSummaryDF)[colnames(treeSummaryDF)!='node']] <-
 treeRules <- partykit:::.list.rules.party(treeModelToSummarise)
 treeSummaryDF$segment <- unname(treeRules)[match(treeSummaryDF$node, labels(treeRules))]
 options(scipen=1000)
-as.data.frame(treeSummaryDF)
+# as.data.frame(treeSummaryDF)
 
-# Add in info about expected number of rows in the full dataset
-names(df)
+#+++++++++++++++++++
+# Add in info about expected number of rows in the full dataset 
+#+++++++++++++++++++
+
+cat('  WARNING: \n   - numRows and cost variables per segment are calculated based on df  ***AFTER FILTERING AD CATEGORIES*** i.e. may be filtered by Layer, Offer, & Group depending on parameter values.\n   - Example: if route=TAS, offerAds=all, groupAds=Retail, & layerAds=notRemarketing, then CPA = [total adspend across retail, non-remarketing DBM ads advertising any route] / [no. of retail, non-remarketing DBM ads advertising any route that were attributed a TAS conversion]\n   - Parameter values are given in name of tree output - make sure planners read this and know what cols refer to.\n')
+  
+# NB following code is based on df, which has already been filtered to remove ads that don't match group, offer, and layer criteria
+
+numConvs_fullDF <- nrow(filter(df, Converter=='y')) 
+numNonConvs_fullDF <- nrow(filter(df, Converter=='n'))/negativeInstanceDownsampling  # NB while modelDF may have some downsampling, df won't (aside from that specified in negativeInstanceDownsampling parameter) 
+nonConvsRatio_fullVsModelDF <- numNonConvs_fullDF/sum(treeSummaryDF$numNonConversions_modelDF)
+
 treeSummaryDF <- treeSummaryDF %>%
-  mutate(numRows=numConversions_modelDF+((numNonConversions_modelDF*downsampleFactor)/negativeInstanceDownsampling))
-colnames(treeSummaryDF)[colnames(treeSummaryDF)=='numRows'] <- paste0('numRows_', gsub('-', '', firstDate), 'To', gsub('-', '', maxDate)) # incorporating date range over which numRows is measured
+  mutate(numRows=round(numConversions_modelDF+(numNonConversions_modelDF*nonConvsRatio_fullVsModelDF), 0))
+sum(treeSummaryDF$numRows) # should be roughly 8 million per month for *all* DBM ads, if 1 row=1 ad c.f. 1 row=1 user
 
+#+++++++++++++++++++
 # Ad info about expected cost per ad
+#+++++++++++++++++++
+
 costDF <- df
-costDF$node <- nodePredictionsDF$node
-# filter(costDF, node==9)$day # checking they align. Totes do
+costDF$node <- as.character(predict(treeModelToSummarise, type = "node", newdata = costDF))
+# as.data.frame(select(treeSummaryDF, node, segment)); unique(filter(costDF, node==9)$adX_Finance) # checking they align. Totes do
 
 costDF <- costDF %>%
   group_by(node) %>%
   summarise(medianDBMRevenueAdvertiserCurrencyCPM=round(quantile(DBMRevenueAdvertiserCurrencyCPM, 0.5), 1),
             lowerQuartileDBMRevenueAdvertiserCurrencyCPM=round(quantile(DBMRevenueAdvertiserCurrencyCPM, 0.25), 1),
-            upperQuartileDBMRevenueAdvertiserCurrencyCPM=round(quantile(DBMRevenueAdvertiserCurrencyCPM, 0.75), 1)) %>%
+            upperQuartileDBMRevenueAdvertiserCurrencyCPM=round(quantile(DBMRevenueAdvertiserCurrencyCPM, 0.75), 1),
+            meanDBMRevenueAdvertiserCurrencyCPM=round(mean(DBMRevenueAdvertiserCurrencyCPM), 1)) %>%
   transmute(node=node, medianRevenueNZD=medianDBMRevenueAdvertiserCurrencyCPM, 
-            IQRRevenueNZD=paste0(lowerQuartileDBMRevenueAdvertiserCurrencyCPM, '-', upperQuartileDBMRevenueAdvertiserCurrencyCPM))
+            IQRRevenueNZD=paste0(lowerQuartileDBMRevenueAdvertiserCurrencyCPM, '-', upperQuartileDBMRevenueAdvertiserCurrencyCPM),
+            meanRevenueNZD=meanDBMRevenueAdvertiserCurrencyCPM)
   
-warning('Could split out cost into weighted average based on converter vs nonconv cost, if worthwhile. Did notice that for some segments converter costs were more than nonconv costs, so could be worth doing. ***ALSO SUGGESTS THERES SOME IMPORTANT VAR IM NOT MODELLING - OR AT LEAST SOME VAR THAT SIGNIFICANTLY INFLUENCES PRICE***\n')
+warning('Could split out cost into weighted average based on converter vs nonconv cost, if worthwhile. Did notice that for some segments converter costs were more than nonconv costs, so could be worth doing. ***ALSO SUGGESTS THERES SOME IMPORTANT VAR IM NOT MODELLING - OR AT LEAST SOME VAR THAT SIGNIFICANTLY INFLUENCES PRICE. E.g. Video vs banner ads***\n')
 
 treeSummaryDF <- treeSummaryDF %>%
   left_join(costDF, by='node') %>%
-  select(-node, -numConversions_modelDF, -numNonConversions_modelDF)
+  select(-node, -numNonConversions_modelDF) %>%
+  rename(numConversions=numConversions_modelDF)  %>%
+  mutate(TotalRevenueNZD=round(numRows*(meanRevenueNZD/1000),0))  %>% # meanRevenue is CPM, so need to divide by 1000 to extrapolate total spend from no. of ads served.
+  mutate(CPA=round(TotalRevenueNZD/numConversions, 0))
+  
+#+++++++++++++++++++
+# Data cleaning
+#+++++++++++++++++++
+
+treeSummaryDF$numRows <- formatC(treeSummaryDF$numRows, format="d", big.mark=",") # add commas into big numbers for easier readability
+colnames(treeSummaryDF)[colnames(treeSummaryDF)=='numRows'] <- paste0('numDBMAds_', gsub('-', '', firstDate), 'To', gsub('-', '', maxDate)) # incorporating date range over which numRows is measured
+cat(  'WARNING: numDBMAds column may need to be calculated differently if outputDatabase is based on one row per user cf one row per ad. At very least name will need to change name to numDBMUsers or similar\n')
 
 # Change to nicer order
 tempSegment <- treeSummaryDF$segment
 treeSummaryDF <- select(treeSummaryDF, -segment)
 treeSummaryDF$segment <- tempSegment
+
+# Make segment descriptions more readable
+treeSummaryDF$segment <- gsub("%in%", "INCLUDES:", treeSummaryDF$segment)
+treeSummaryDF$segment <- gsub("c\\(", "", treeSummaryDF$segment)
+treeSummaryDF$segment <- gsub("&", "AND", treeSummaryDF$segment)
+treeSummaryDF$segment <- gsub("<= 0", "IS EXCLUDED", treeSummaryDF$segment)
+treeSummaryDF$segment <- gsub("> 0", "IS INCLUDED", treeSummaryDF$segment)
+treeSummaryDF$segment <- gsub("\\)", "", treeSummaryDF$segment)
+
+# Round numeric vars to make more readable
+treeSummaryDF[, colnames(treeSummaryDF) %in% c('lift', 'baselineProbConversion', 'relativeProbConversion')] <- 
+  round(treeSummaryDF[, colnames(treeSummaryDF) %in% c('lift', 'baselineProbConversion', 'relativeProbConversion')], 2)
 
 as.data.frame(treeSummaryDF)
 
@@ -429,209 +660,41 @@ as.data.frame(treeSummaryDF)
 # table(nodeXdf$Converter)
 # 152/(152+9031) # yup, all ads up.
 
-#===============
-# Apply classifications segments to original database, to calc no. of users, no. of imps, no. of conversions etc 
-#===============
-
-# EDIT - will need to make df dummified - same vars as modelDF_dummified - in order to apply segments.
-
-
+#+++++++++++++++++++
 # Save to file
-write.csv(treeSummaryDF, file=paste0(pathSave, 'TREERESULTS_', outputDatabase, '_negativeInstanceDownsampling', negativeInstanceDownsampling, '_', dataset, 'DF_', route, '_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '.csv'), row.names=FALSE)
+#+++++++++++++++++++
+
+write.csv(treeSummaryDF, file=paste0(pathSave, 'TREERESULTS_', outputDatabase, '_negativeInstanceDownsampling', negativeInstanceDownsampling, '_', dataset, 'DF_', route, '_offer', offerAds, '_group', groupAds, '_layer', layerAds, '_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '.csv'), row.names=FALSE)
+
+  
+#+++++++++++++++++++
+# TEMP graphing distribution of costs per ad across segments based on best CTree model above] ----
+#+++++++++++++++++++
+
+plotDF <- df
+plotDF$node <- as.character(predict(treeModelToSummarise, type = "node", newdata = plotDF))
+  
+windows()
+ggplot(plotDF, aes(node, DBMRevenueAdvertiserCurrencyCPM)) + geom_jitter(height=0, alpha=0.01) + # horiz jitter only
+  stat_summary(fun.data = mean_cl_boot, geom = "errorbar", colour='blue', width = 0.2)
+graphics.off()
 
 
-# #__________________________________________________________________________________________________________________________________
-# 
-# #5. Automatically decide best features to include in the model
-# #__________________________________________________________________________________________________________________________________
-# 
-# set.seed(7)
-# 
-# # define the control using a random forest selection function
-# control <- rfeControl(functions=rfFuncs, method="cv", number=10)
-# # run the RFE algorithm
-# results <- rfe(PimaIndiansDiabetes[,1:8], PimaIndiansDiabetes[,9], sizes=c(1:8), rfeControl=control)
-# # summarize the results
-# print(results)
-# # list the chosen features
-# predictors(results)
-# # plot the results
-# plot(results, type=c("g", "o"))
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# #===============
-# # model - all predictors
-# #===============
-# 
-# startTime2 <- proc.time()[3]
-# set.seed(1) # randomness in cross-validation.
-# lassoResults <- cv.glmnet(y=y, x=x, family='binomial', alpha=1)  # alpha=0 is ridge (params dont shrink to zero, so isn't a variable selection method. But better when high collinearity among vars or when p>n). alpha=1 is lasso. 0 > alpha < 1 is a blend. Can poss use parallel to do this - see glmnet pdf, cv.glm example section, for an example.
-# cat(' ...Lasso regression run in', (proc.time()[3]-startTime2)/60, 'minutes\n')
-# 
-# betas_minLambda <- coef(lassoResults, s = 'lambda.min') # this is the run that cross-validated lass regression says is best (i.e. has best value of lambda, the param that controls degree of penalisation).
-# 
-# # save a hard copy of params
-# options(scipen = 1000)
-# betasTable <- data.frame(X=row.names(betas_minLambda),
-#                          Estimate=unname(betas_minLambda[,1])) # need to put betas in print-friendly format
-# betasTable
-# 
-# sum(predict(lassoResults, newx=x, type='response', s='lambda.min'))
-# sum(ifelse(df$Converter=='y', 1, 0))
-# sum(ifelse(df$Converter=='y', 1, 0))/nrow(df)
-# 
-# #===============
-# # model - ad categories & DBM region only   * cos url categories confounded with ad x categories, & median bid price may not be useful for creating segments
-# #===============
-# 
-# x <- x[, !grepl('url_', colnames(x))]
-# x <- x[, !grepl('medianBidPrice', colnames(x))]
-# x <- x[, !grepl('CountryCode', colnames(x))]
-# 
-# startTime2 <- proc.time()[3]
-# set.seed(1) # randomness in cross-validation.
-# lassoResults <- cv.glmnet(y=y, x=x, family='binomial', alpha=1)  # alpha=0 is ridge (params dont shrink to zero, so isn't a variable selection method. But better when high collinearity among vars or when p>n). alpha=1 is lasso. 0 > alpha < 1 is a blend. Can poss use parallel to do this - see glmnet pdf, cv.glm example section, for an example.
-# cat(' ...Lasso regression run in', (proc.time()[3]-startTime2)/60, 'minutes\n')
-# 
-# betas_minLambda <- coef(lassoResults, s = 'lambda.min') # this is the run that cross-validated lass regression says is best (i.e. has best value of lambda, the param that controls degree of penalisation).
-# 
-# # save a hard copy of params
-# options(scipen = 1000)
-# betasTable <- data.frame(X=row.names(betas_minLambda),
-#                          Estimate=unname(betas_minLambda[,1])) # need to put betas in print-friendly format
-# betasTable
-# 
-# sum(predict(lassoResults, newx=x, type='response', s='lambda.min'))
-# sum(ifelse(df$Converter=='y', 1, 0)) 
-# 
-# #===============
-# # create conversion prob per segment graphs
-# #===============
-# 
-# newx <- matrix(nrow=1, ncol=ncol(x), data=0)
-# colnames(newx) <- colnames(x) # where is DBMREgionAuckland?
-# # haven't finished... decided to do with logistic regression instead to get std errors
-# 
-# #__________________________________________________________________________________________________________________________________
-# 
-# #2b. Preliminary logistic regression model to look at which vars are significant, & try creating 'conversion probability per segment' graphs based on model outputs. Doing instead of above cos I can get s.e's around estimates  
-# #__________________________________________________________________________________________________________________________________
-# 
-# #===============
-# # model
-# #===============
-# 
-# logRegDF <- select(df, which(!grepl('url', colnames(df)))) # too correlated with ad x categories
-# logRegDF <- select(logRegDF, -medianBidPrice, -CountryCode)
-# 
-# mLR <- glm(Converter~., data=logRegDF, family='binomial')
-# summary(mLR)
-# 
-# #===============
-# # predict 'n' plot
-# #===============
-# 
-# ### Ad category
-# 
-# newData <- logRegDF[1,] # setting up schema
-# newData$DBMRegion <- 'Auckland' # setting region to most common value
-# 
-# adCategoriesVec <- colnames(newData)[grepl('adCategory', colnames(newData))]
-# resultsList <- list()
-# 
-# for(i in 1:length(adCategoriesVec)){
-#   adCat_i <- adCategoriesVec[i]  
-#   newData[,grepl('adCategory', colnames(newData))] <- 0 #  startign off with no ad categories being seen
-#   newData[, which(colnames(newData)==adCat_i)] <- 1
-#   adCatPrediction <- predict(mLR, newdata=newData, type='response', se=TRUE)
-#   resultsList[[i]] <- data.frame(adCategory=adCat_i,
-#                                  convProb=adCatPrediction$fit, 
-#                                  loCI=adCatPrediction$fit-1.96*adCatPrediction$se.fit,
-#                                  upCI=adCatPrediction$fit+1.96*adCatPrediction$se.fit)
-# }
-# 
-# plotDF <- bind_rows(resultsList)
-# 
-# ggplot(plotDF, aes(adCategory, convProb, colour=adCategory)) + geom_point()  + geom_errorbar(ymin=plotDF$loCI, ymax=plotDF$upCI) + 
-#   ylim(min(plotDF$loCI), max(plotDF$upCI)) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + theme(legend.position="none")
-# 
-# coef(mLR)
-# 
-# #__________________________________________________________________________________________________________________________________
-# 
-# #25. messing around with testing different machine learning algorithms
-# #__________________________________________________________________________________________________________________________________
-# 
-# ggplot(df, aes(medianBidPrice, Converter)) + geom_jitter(alpha=0.1) + geom_smooth()
-# suppressMessages(library(randomForest))
-# mRF <- randomForest(as.factor(Converter) ~ medianBidPrice, data=df) 
-# mRF
-# plot(x=df$medianBidPrice, y=predict(mRF, type='prob')[,2], col='red')
-# names(df)
-# newdata <- data.frame(medianBidPrice=seq(from=0, to=max(df$medianBidPrice), by=0.001))
-# newdata
-# 
-# myPoints <- unname(predict(mRF, newdata, type='prob')[,2])
-# plot(x=newdata$medianBidPrice, y=myPoints, type='l')
-# myPoints
-# as.numeric(newdata)
-# graphics.off()
-# 
-# mPoly2 <- glm(as.factor(Converter)~medianBidPrice + scale(medianBidPrice^2, center=TRUE), data=df, family='binomial')
-# mPoly3 <- glm(as.factor(Converter)~medianBidPrice + scale(medianBidPrice^2, center=TRUE) + scale(medianBidPrice^3, center=TRUE), data=df, family='binomial')
-# 
-# AIC(mPoly2, mPoly3)
-# 
-# predict(mPoly, type='response')
-# 
-# plot(df$medianBidPrice, predict(mPoly, type='response'))
-# 
-# #===============
-# # using caret to get AUC
-# #===============
-# 
-# caretDF <- transmute(df, y=as.factor(Converter), medianBidPrice=medianBidPrice, medianBidPrice2=scale(medianBidPrice, scale=FALSE)^2, 
-#                      medianBidPrice3=scale(medianBidPrice, scale=FALSE)^3)
-# caretDF$y <- ifelse(caretDF$y=='1', 'Converter', 'Nonconverter')
-# str(caretDF$y)
-# library(caret)
-# library(mlbench)
-# set.seed(1203)
-# 
-# # change from default bootstrap to CV
-# ctrl <- trainControl(method='repeatedcv', repeats=3, # 3 repeats of 10-fold CV
-#                      classProbs=TRUE,
-#                      summaryFunction=twoClassSummary) # need classProbs and summaryFunction set thusly to do ROC analysis
-# 
-# # Train & test models
-# mLogReg <- train(y~medianBidPrice, data=caretDF, 
-#                  method='glm', family='binomial',
-#                  metric='ROC', 
-#                  trControl=ctrl)
-# mLogReg2 <- train(y~medianBidPrice + medianBidPrice2, data=caretDF, 
-#                   method='glm', family='binomial',
-#                   metric='ROC', 
-#                   trControl=ctrl)
-# mLogReg3 <- train(y~medianBidPrice + medianBidPrice2 + medianBidPrice3, data=caretDF, 
-#                   method='glm', family='binomial',
-#                   metric='ROC', 
-#                   trControl=ctrl)
-# mGlmNet <- train(y~medianBidPrice + medianBidPrice2 + medianBidPrice3, data=caretDF, 
-#                  method='glmnet', family='binomial',
-#                  metric='ROC', 
-#                  trControl=ctrl)
-# mRF <- train(y~medianBidPrice, data=caretDF, 
-#              method='rf',
-#              metric='ROC', 
-#              trControl=ctrl)
-# 
-# # compare models' average ROC across folds  # yus...
-# data.frame(mLogRegROC=mLogReg$results$ROC, mLogRegROC2=mLogReg2$results$ROC, mLogRegROC3=mLogReg3$results$ROC, mRF=mRF$results$ROC,
-#            mGlmNet=mGlmNet$results$ROC) # glmnet has multiple ROC values for some reason.
-# 
+
+
+#__________________________________________________________________________________________________________________________________
+
+# 7. For non-tree models, try creating segments manaully - iterate thru all possible combinations of final modelled vars, then predict from model ----
+#__________________________________________________________________________________________________________________________________
+
+modelledData <- modelDF
+modelPreds <- colnames(modelledData)[colnames(modelledData)!='Converter']
+
+allVarsUniqueLevelsList <- list()
+for(i in 1:length(modelPreds)){
+  allVarsUniqueLevelsList[[i]] <- unique(modelledData[,modelPreds[i]])
+}
+names(allVarsUniqueLevelsList) <- modelPreds
+
+allCombinationsModelledVarsDF <- expand.grid(allVarsUniqueLevelsList) # ERror - out of memory
+

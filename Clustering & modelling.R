@@ -1,9 +1,4 @@
 
-control <- trainControl(method = "timeslice",  # this is better way of calling createTimeSlices function
-                        initialWindow = 235, 
-                        horizon = 130,      
-                        fixedWindow = TRUE)
-
 #__________________________________________________________________________________________________________________________________
 
 # Add description of what code does here...
@@ -27,15 +22,19 @@ pathSave <- paste0(basePath, 'AirNZ segmentation results/')
 responseVar <- 'lastClickConversion' # 'Conversion' or 'lastClickConversion'. Former is whether a user converted at any point over model period; latter is whether a given ad was attributed a covnersion via last click methodology. lastClickConv only applies to outputDatabase==df_oneRowPerAdAndLastClickConversionResponse
 
 # Define which types of ads we want to look at     ***CURRENTLY ONLY IMPLEMENTED FOR df_oneRowPerAdAndLastClickConversionResponse ***
-offerAds <- 'allRoutes' # 'focalRoute', 'allRoutes' # e.g. if routeAds==focalRoute, then for route==TAS we would only include ads that have a 'Tasman sale' message in the model
+offerAds <- 'allRoutes' # 'TAS', 'DOM', 'PI', 'LH', 'allRoutes' # e.g. if offerAds==TAS then we would only include ads that have a 'Tasman sale' message in the model
 layerAds <- 'all' # 'notRemarketing', 'Remarketing', or 'all'. If 'notRemarketing' then exclude RMK ads from model.
-groupAds <- 'all' # 'retail', 'brand', or 'all'. Az reckons we would only ever use the model to buy retail ads (i.e. ads relating to specific sales), but including other options for completeness.
+groupAds <- 'all' # 'retail', 'brand', or 'all'. Az reckons we would only ever use the model to buy retail ads (i.e. ads relating to specific sales), but including other options for completeness (and may be required if there aren't enough convs just looking at retail & non-RMK).
 
 # Define which var sets to include in models
 varCategories <- c('responseVar', 'adCatVars', 'regionVars', 'timeVars') # responseVar, adCatVars, urlVars, deviceVars, regionVars, countryCodeVars, bidPriceVars, timeVars. # See bottom of BKMK 0 for which vars are included in each of these sets.
 
+# Define cross validation training control params *NB needed values of at least ~15 & ~15 in intial tests, otherwise end up with NAs in predictions.  
+horizon=15
+initialWindow=15 # see http://stackoverflow.com/questions/30233144/time-series-splitting-data-using-the-timeslice-method for deets.
+
 # Set params which influence how many segments end up in final outputs
-numLambdaSEs <- 4 # if using lasso feature selection, pick highest lambda that is within [numLambdaSEs] standard errors of best model. Common advice is that the best model within 1se is the best, but I've found this retains many features and heaps of segments. NB the code will output AUC values for best vs lambdaSE model, so can review how much worse the stronger feature selection makes the model.
+numLambdaSEs <- 1 # if using lasso feature selection, pick highest lambda that is within [numLambdaSEs] standard errors of best model. Common advice is that the best model within 1se is the best, but I've found this retains many features and heaps of segments. NB the code will output AUC values for best vs lambdaSE model, so can review how much worse the stronger feature selection makes the model.
 liftThreshold <- 1.25 
 numRowsThreshold <- 10000 # in full df - after reversing negativeInstanceDownsampling - how many rows (imps) should each ad have?
 
@@ -43,7 +42,7 @@ numRowsThreshold <- 10000 # in full df - after reversing negativeInstanceDownsam
 firstDate <- '2016-11-16'
 maxDate <- '2016-12-31'
 negativeInstanceDownsampling <- 0.001
-route <- 'LH'    
+route <- 'allRoutes'    
 outputDatabase <- 'df_oneRowPerAdAndLastClickConversionResponse'              # these params have no other use; just used to pull in R data
 
 #+++++++++++++++++
@@ -114,6 +113,59 @@ if(naRows >0){
   df <- na.omit(df)
 }
 
+#+++++++++++++++++++
+# read in createIrregularTimeSlices fucntion. See here for details https://r-norberg.blogspot.com.au/2016/08/data-splitting-time-slices-with.html
+#+++++++++++++++++++
+
+createIrregularTimeSlices <- function(y, initialWindow, horizon = 1, unit = c("sec", "min", "hour", "day", "week", "month", "year", "quarter"), fixedWindow = TRUE, skip = 0) {
+  if(inherits(y, 'Date')) y <- as.POSIXct(y)
+  stopifnot(inherits(y, 'POSIXt'))
+  
+  # generate the sequence of date/time values over which to split. These will always be in ascending order, with no missing date/times.
+  yvals <- seq(from = lubridate::floor_date(min(y), unit), 
+               to = lubridate::ceiling_date(max(y), unit), 
+               by = unit)
+  
+  # determine the start and stop date/times for each time slice
+  stops <- seq_along(yvals)[initialWindow:(length(yvals) - horizon)]
+  if (fixedWindow) {
+    starts <- stops - initialWindow + 1
+  }else {
+    starts <- rep(1, length(stops))
+  }
+  
+  # function that returns the indices of y that are between the start and stop date/time for a slice 
+  ind <- function(start, stop, y, yvals) {
+    which(y > yvals[start] & y <= yvals[stop])
+  }
+  train <- mapply(ind, start = starts, stop = stops, MoreArgs = list(y = y, yvals = yvals), SIMPLIFY = FALSE)
+  test <- mapply(ind, start = stops, stop = (stops + horizon), MoreArgs = list(y = y, yvals = yvals), SIMPLIFY = FALSE)
+  names(train) <- paste("Training", gsub(" ", "0", format(seq(along = train))), sep = "")
+  names(test) <- paste("Testing", gsub(" ", "0", format(seq(along = test))), sep = "")
+  
+  # reduce the number of slices returned if skip > 0
+  if (skip > 0) {
+    thin <- function(x, skip = 2) {
+      n <- length(x)
+      x[seq(1, n, by = skip)]
+    }
+    train <- thin(train, skip = skip + 1)
+    test <- thin(test, skip = skip + 1)
+  }
+  
+  # eliminate any slices that have no observations in either the training set or the validation set
+  empty <- c(which(sapply(train, function(x) length(x) == 0)),
+             which(sapply(test, function(x) length(x) == 0)))
+  if(length(empty) > 0){
+    train <- train[-empty]
+    test <- test[-empty]
+  }
+  
+  out <- list(train = train, test = test)
+  out
+}
+
+
 #_______________________________________________________________________________________________________________________________________________________________
 
 # 1.i. Based on values for ad attributes in parameters, either include or exclude individual ads from analysis ----
@@ -126,7 +178,7 @@ if(outputDatabase=='df_oneRowPerAdAndLastClickConversionResponse'){
   dfPositiveInstancesPreAdRemoval <- nrow(filter(df, Converter=='y'))
   dfNegativeInstancesPreAdRemoval <- nrow(filter(df, Converter=='n'))
   
-  if(offerAds=='focalRoute' & route!='allRoutes'){ # if route==allRoutes then don't need this step
+  if(offerAds!='allRoutes'){ # if route==allRoutes then don't need this step
     df <- filter(df, OFFER==route)
   } else if(offerAds=='allRoutes'){
     df <- df
@@ -166,7 +218,7 @@ if(outputDatabase=='df_oneRowPerAdAndLastClickConversionResponse'){
 cat('\n----Creating "modelDF", which contains a subset of predictors for input into models (NB may still be subsequent feature selection----\n\n')
 
 # adCatVars, urlVars, deviceVars, regionVars, countryCodeVars, bidPriceVars, timeVars
-varsForModelVec <- responseVar
+varsForModelVec <- c(responseVar) # time needed for createTimeSlices cross validation
 if('adCatVars' %in% varCategories) varsForModelVec <- c(varsForModelVec, adCatVars)
 if('urlVars' %in% varCategories) varsForModelVec <- c(varsForModelVec, urlVars)
 if('deviceVars' %in% varCategories) varsForModelVec <- c(varsForModelVec, deviceVars)
@@ -176,10 +228,7 @@ if('bidPriceVars' %in% varCategories) varsForModelVec <- c(varsForModelVec, bidP
 if('timeVars' %in% varCategories) varsForModelVec <- c(varsForModelVec, timeVars)
 
 modelDF <- select(df, which(colnames(df) %in% varsForModelVec))
-
-cat(' Variables entered into models:\n')
-print(colnames(modelDF))
-cat('\n')
+modelDFTimes <- df$time # needed for createTimeSlices
 
 #__________________________________________________________________________________________________________________________________
 
@@ -210,7 +259,11 @@ registerDoParallel(cl)
 getDoParWorkers() # check how many cores are getting used
 
 # Set up training control
-control <- trainControl(method="repeatedcv", number=5, repeats=5,
+my_partitions <- createIrregularTimeSlices(modelDFTimes, initialWindow=initialWindow, horizon=horizon, unit = "day", fixedWindow = T) # see here for description of this function https://r-norberg.blogspot.com.au/2016/08/data-splitting-time-slices-with.html
+  
+control <- trainControl(index=my_partitions$train, 
+                        indexOut=my_partitions$test, # part of createIrregularTimeSlices - see above
+                        # method="repeatedcv", number=5, repeats=5,
                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
                         classProbs=TRUE,
                         sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
@@ -218,7 +271,7 @@ control <- trainControl(method="repeatedcv", number=5, repeats=5,
 #+++++++++++++++++
 # run models using caret defaults
 #+++++++++++++++++
-
+  
 mGlmnet <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
 mSVMLinear <- train(Converter~., data=modelDF, method="svmLinear", trControl=control, metric='ROC')
 mSVMRadial <- train(Converter~., data=modelDF, method="svmRadial", trControl=control, metric='ROC')
@@ -238,6 +291,7 @@ graphics.off()
 
 AUCtable <- select(AUCs$values, which(!grepl('Sens', colnames(AUCs$values)) & 
                                         !grepl('Spec', colnames(AUCs$values)) & colnames(AUCs$values)!='Resample'))
+
 colnames(AUCtable) <- gsub('~ROC', '', colnames(AUCtable))
 modelNames <- colnames(AUCtable)
 AUCtable <- data.frame(model=modelNames,
@@ -245,10 +299,9 @@ AUCtable <- data.frame(model=modelNames,
                        lowerQ=round(apply(AUCtable, 2, quantile, 0.25), 2), 
                        upperQ=round(apply(AUCtable, 2, quantile, 0.75), 2))
 AUCtable <- arrange(AUCtable, desc(median))
-
+  
 cat(' AUC of major models, using caret defaults:\n')
 print(AUCtable, row.names=F)
-
 
 # #__________________________________________________________________________________________________________________________________
 # 
@@ -267,12 +320,6 @@ set.seed(1203)
 cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
 registerDoParallel(cl)
 getDoParWorkers() # check how many cores are getting used
-
-# Set up training control
-control <- trainControl(method="repeatedcv", number=5, repeats=5,
-                        summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
-                        classProbs=TRUE,
-                        sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
 
 #+++++++++++++++++
 # run models using caret defaults, to see if setting alpha=1 (which then allows feature selecting by tuning lambda) gives an ok model
@@ -314,12 +361,6 @@ tGrid <- expand.grid(alpha=1, # wanting feature selection, so set alpha=1
 cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
 registerDoParallel(cl)
 getDoParWorkers() # check how many cores are getting used
-
-# Set up training control
-control <- trainControl(method="repeatedcv", number=10, repeats=5,
-                        summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
-                        classProbs=TRUE,
-                        sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
 
 # Rerun model
 mGlmnet2 <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC', tuneGrid=tGrid)
@@ -447,11 +488,6 @@ cat(paste0(' Using lasso model whose performance is within ', numLambdaSEs, 'SE 
 # # Use elastic net's inbuilt var selection and compare this method
 # #+++++++++++++++++++
 # 
-# control <- trainControl(method="repeatedcv", number=5, repeats=5,
-#                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
-#                         classProbs=TRUE,
-#                         sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
-# 
 # # Run a few models using caret defaults
 # mGlmnet <- train(Converter~., data=modelDF, method="glmnet", trControl=control, metric='ROC')
 # glmnetCoefs <- coef(mGlmnet$finalModel, s=mGlmnet$bestTune$lambda)
@@ -469,20 +505,14 @@ cat(paste0(' Using lasso model whose performance is within ', numLambdaSEs, 'SE 
 
 #__________________________________________________________________________________________________________________________________
 
-# # 5. For major model classes that appear to work well, try different downsampling regimes [*** HASHING OUT - takes ages, and I can return to this later if needs be ***]----
+# # 5. For major model classes that appear to work well, try different downsampling regimes [*** HASHING OUT - takes ages, and I can return to this later if needs be. ALSO NEED TO SPECFIY CONTROL WITH CREATETIMESLICES METHOD AS ABOVE ***]----
 # #__________________________________________________________________________________________________________________________________
 # 
 # # Set up parallel backend
 # cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
 # registerDoParallel(cl)
 # getDoParWorkers() # check how many cores are getting used
-# 
-# # Set up training control
-# control <- trainControl(method="repeatedcv", number=5, repeats=3,
-#                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
-#                         classProbs=TRUE,
-#                         sampling='down') # downsampling initially, but below update this to upsample, SMOTE, and ROSE. As per https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
-# 
+# # 
 # #+++++++++++++++++++
 # # Run models
 # #+++++++++++++++++++
@@ -539,11 +569,6 @@ cat(paste0(' Using lasso model whose performance is within ', numLambdaSEs, 'SE 
 # # Set up tuning grid
 # grid <- expand.grid(mincriterion=c(0.1, seq(0.5, 0.99, 0.05), 0.99), maxdepth=c(5, 10))
 # 
-# # Set up training control
-# control <- trainControl(method="repeatedcv", number=5, repeats=3,
-#                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
-#                         classProbs=TRUE,
-#                         sampling='down') # downsampling initially, but could update this to upsample, SMOTE, and ROSE. As per https://topepo.github.io/caret/subsampli
 # mCTree_ds <- train(Converter~., data=modelDF, method="ctree2", trControl=control, tuneGrid=grid, metric='ROC')
 # 
 # windows()
@@ -720,9 +745,9 @@ cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMA
 registerDoParallel(cl)
 getDoParWorkers() # check how many cores are getting used
 
-# Set up training control
+# Set up training control - no need for split into train/test sets, just rerunning model on prespecified param values.
 control <- trainControl(method="none",
-                        summaryFunction=twoClassSummary,	# Use AUC to pick the best model (e.g. lambda in glmnet)
+                        summaryFunction=twoClassSummary,
                         classProbs=TRUE,
                         sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
 
@@ -978,7 +1003,7 @@ cat(' Final output:\n')
 print(head(summaryDF, 2))
 print(tail(summaryDF, 2))
 
-write.csv(summaryDF, file=paste0(pathSave, 'LASSORESULTS_', outputDatabase, '_negativeInstanceDownsampling', negativeInstanceDownsampling, '_', dataset, 'DF_', route, '_offer', offerAds, '_group', groupAds, '_layer', layerAds, '_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '.csv'), row.names=FALSE)
+write.csv(summaryDF, file=paste0(pathSave, 'LASSORESULTS_', outputDatabase, '_negativeInstanceDownsampling', negativeInstanceDownsampling, '_', dataset, 'DF_', route, '_offer', offerAds, '_group', groupAds, '_layer', layerAds, '_', numLambdaSEs, 'lambdaSEs_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '.csv'), row.names=FALSE)
 
 cat(' WARNING - Need to make sure models dont have numeric variables - at least if Im using non-tree models to make segments out of all combinations of variables (there are infinite possible combinations for continuous vars). If I do add in numerics, will need to use tree models I think, and also poss normalise/scale before modelling\n')
 

@@ -30,7 +30,7 @@ pathData <- paste0(basePath, 'data/') # path to saved R images
 firstDate <- '2016-11-16'
 maxDate <- '2016-12-31' # THESE DATES NEED TO MATCH THOSE IN ReadInDT2LogFiles.r (just used to recreate name of rda file to read in)
 pathSave <- paste0(basePath, 'AirNZ segmentation results/')
-route <- 'allRoutes' # allRoutes' # 'TAS', 'DOM', 'PI', 'LH', 'allRoutes' # NB could use a SourceAllScripts.R script to loop through all routes - see classifyURLsByDomainName&ConvProbForURLByAdPageCategory.r for an e.g.
+route <- 'allRoutes' # allRoutes' # 'TAS', 'DOM', 'PI', 'LH', 'allRoutes' # WE GENERALLY WANT ALLROUTES HERE - COS AIRLINE IS INTERESTED IN MAXIMISING SALES ACROSS EVERY ROUTE, NOT JUST THE ROUTE RELATING TO A PARTICULAR SALE
 outputDatabase <- 'df_oneRowPerAdAndLastClickConversionResponse' # 'df_rowsGroupedAndSummarisedByUser', 'df_oneRandomlySelectedRowPerUser', 'df_oneRowPerAdAndLastClickConversionResponse'. How does the final database deal with the fact that there are multiple rows per user? Also is the response whether or not the user converts at some point in data period, or whether or not the ad leads to a last click conversion being attributed?
 lastClickWindow <- 10  # no. of days to look back for attributing conversions via last click, if using userDefined method.
 lastImpWindow <- 10 # as above, but for impressions. NOTE (1) imps will only be attributed a conversion if there aren't any clicks within the click window; (2) if ignoring impressions altogether then set lastImpWindow to 0.
@@ -290,7 +290,6 @@ impsRemovedList <- foreach(i=icount(numIterations), .packages = c("tcltk", "dply
 
 clickAuctionsDF <- bind_rows(impsRemovedList)
 df <- bind_rows(clickAuctionsDF, noclickAuctionsDF)
-
 
 #__________________________________________________________________________________________________________________________________
 

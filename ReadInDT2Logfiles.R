@@ -5,12 +5,12 @@
 
 #__________________________________________________________________________________________________________________________________
 
-#1. set parameters, define cols we want to keep in final dataframe, & load packages
+#1. set parameters, define cols we want to keep in final dataframe, & load packages ----
 #__________________________________________________________________________________________________________________________________
 
-#===============
+#+++++++++++++++++++
 # parameters
-#===============
+#+++++++++++++++++++
 
 rm(list=ls())
 Sys.setenv(TZ="Pacific/Auckland")
@@ -22,18 +22,21 @@ advertiserID2 <- '620645' # If only one advertiserID just use same no. of both.
 clicksDirectoryName <- 'click/' 
 impsDirectoryName <- 'impression/'  # what is the name of the folder that all clicks/imps/acts subfolders are stored in?
 actsDirectoryName <- 'activity/' 
-firstDate <- '2016-11-16'
+firstDate <- '2016-12-31'
 maxDate <- '2016-12-31'
 
 colsToKeep <- c('action_type', 'Event Time', 'User ID', 'Advertiser ID', # Note thse names get changed slightly in this code, with e.g. spaces & brackets stripped out and '/' changed to 'Slash'.
                 'Campaign ID', 'Ad ID', 'Site ID (DCM)', 'Placement ID', 'Rendering ID',
                 'Activity ID', 'Floodlight Configuration', 
-                'Country Code', 'Browser/Platform ID', 'Browser/Platform Version', 'Operating System ID', 'Other Data', 
-                'DBM Bid Price (Advertiser Currency)', 'DBM Revenue (Advertiser Currency)', 'DBM URL', 'DBM Adx Page Categories', 'DBM State/Region ID',
+                'Other Data', 
+                'DBM Revenue (Advertiser Currency)', 'DBM URL', 'DBM Adx Page Categories', 'DBM State/Region ID',
                 'DBM Operating System ID', 'DBM Browser/Platform ID', 'DBM Device Type', 'DBM Mobile Make ID', 'DBM Mobile Model ID',
-                # Vars that I originally included in EDA, but decided weren't useful:
-                'Event Type', 'Event Sub-Type', 'State/Region',  'DBM Matching Targeted Segments', 'DBM City ID', 'DBM ZIP/Postal Code',
-                'DBM Ad Position', 'DBM Auction ID') # this col allows us to match click and imp for an individual ad
+                'DBM Auction ID') # this col allows us to match click and imp for an individual ad
+
+# Vars that I originally included in EDA, but decided weren't useful:
+# 'Event Type', 'Event Sub-Type', 'State/Region',  'DBM Matching Targeted Segments', 'DBM City ID', 
+# 'DBM ZIP/Postal Code', 'Country Code', 'Browser/Platform ID', 'Browser/Platform Version', 'Operating System ID', 
+# 'DBM Bid Price (Advertiser Currency)', 'DBM Ad Position', 
 
 # # Code to find above names:
 # impFileFolder1 <- paste0(basePath, impsDirectoryName, list.files(paste0(basePath, impsDirectoryName))[1], '/')
@@ -71,7 +74,7 @@ cat('\n      ------ Loading files', firstDate, 'to', maxDate, '// Saving fullDF 
 
 #__________________________________________________________________________________________________________________________________
 
-#2-a. Before starting, count the number of files in each folder and throw an error if incorrect  (noticed a problem with an extra file in impressions)
+#2-a. Before starting, count the number of files in each folder and throw an error if incorrect  (noticed a problem with an extra file in impressions) ----
 #__________________________________________________________________________________________________________________________________
 
 daysInDateRange <- as.numeric((as.Date(maxDate)-as.Date(firstDate))+1) # +1 COS WE CURRENTLY SPECIFY firstDate-maxDate INCLUSIVE WHEN FILTERING BELOW
@@ -174,7 +177,7 @@ if(length(actsFoldersVec)!=daysInDateRange){
 
 #__________________________________________________________________________________________________________________________________
 
-#2-b. write function that reads in all the files within a given folder, filters by advertiserID, cleans colNames, and then binds together
+#2-b. write function that reads in all the files within a given folder, filters by advertiserID, cleans colNames, and then binds together ----
 #__________________________________________________________________________________________________________________________________
 
 # Note that current data structure has clicks, imps, and acts in different folders - so no need to worry about different schemas at this point
@@ -221,12 +224,12 @@ rbindAllFilesInAFolderFun <- function(folderPath, interactionType){ # 'clicks', 
 
 #__________________________________________________________________________________________________________________________________
 
-#3. Now define paths to folders containing all clicks, imps, and acts csvs, then use above to read them in and rbind together. Do separately for clicks, imps, and acts, since their schemas are different
+#3. Now define paths to folders containing all clicks, imps, and acts csvs, then use above to read them in and rbind together. Do separately for clicks, imps, and acts, since their schemas are different ----
 #__________________________________________________________________________________________________________________________________
 
-#===============
+#+++++++++++++++++++
 # clicks
-#===============
+#+++++++++++++++++++
 
 cat(' Reading in clicks files with foreach. NB fread warnings may not print using this method')
 
@@ -274,9 +277,9 @@ rm(clicksList)
 # ggplot(plotDF, aes(dateHour, numTouchpoints)) + geom_line() # should just be some value for every hour of every day
 # graphics.off()
 
-#===============
+#+++++++++++++++++++
 # imps
-#===============
+#+++++++++++++++++++
 
 cat(' ...Reading in imps files with foreach')
 
@@ -310,9 +313,9 @@ impsList <- foreach(i=icount(numIterations), .packages = c("tcltk", "data.table"
 impsDF <- rbindlist(impsList)
 rm(impsList)
 
-#===============
+#+++++++++++++++++++
 # acts
-#===============
+#+++++++++++++++++++
 
 cat(' ...Reading in acts files with foreach\n ')
 
@@ -348,7 +351,7 @@ rm(actsList)
 
 #__________________________________________________________________________________________________________________________________
 
-#4. Bind acts, clicks, and imps together, then clean dataframe (keeping relevant cols, setting time properly etc) & save images
+#4. Bind acts, clicks, and imps together, then clean dataframe (keeping relevant cols, setting time properly etc) & save images ----
 #__________________________________________________________________________________________________________________________________
 
 cat('\nSaving data to file\n')
@@ -360,15 +363,15 @@ rm(clicksDF, actsDF, impsDF)
 # Put date into correct time
 df$EventTime <- as.POSIXct(df$EventTime/1000000, origin='1970-01-01') # event time is microseconds since 1970-01-01, but R works in seconds
 
-#===============
+#+++++++++++++++++++
 # Write to file - all data
-#===============
+#+++++++++++++++++++
 
 save(df, file=paste0(basePath, 'database_usefulColumnsOnly_fullDF_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '.rda'))
 
-#===============
+#+++++++++++++++++++
 # write to file - subsetDF. Randomly remove users according to samplesize parameter
-#===============
+#+++++++++++++++++++
 
 # downsample according to samplesize parameter
 if(samplesize_subsetDF<1){
@@ -380,9 +383,9 @@ if(samplesize_subsetDF<1){
 save(df, file=paste0(basePath, 'database_usefulColumnsOnly_subsetDF_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '.rda'))
 gc()
 
-# #===============
+# #+++++++++++++++++++
 # # Memory usage function - used for fixing potential memory hog objects
-# #===============
+# #+++++++++++++++++++
 # 
 # # Full function:
 # .ls.objects <- function (pos = 1, pattern, order.by,

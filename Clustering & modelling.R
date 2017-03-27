@@ -1,4 +1,3 @@
-
 #__________________________________________________________________________________________________________________________________
 
 # Add description of what code does here...
@@ -21,17 +20,17 @@ basePath <- 'E:/JAY/'
 pathData <- paste0(basePath, 'data/')
 pathSave <- paste0(basePath, 'AirNZ segmentation results/')
 responseVar <- 'lastClickConversion' # 'Conversion' or 'lastClickConversion'. Former is whether a user converted at any point over model period; latter is whether a given ad was attributed a covnersion via last click methodology. lastClickConv only applies to outputDatabase==df_oneRowPerAdAndLastClickConversionResponse
-offerAds <- 'allRoutes' # 'TAS', 'DOM', 'PI', 'LH', 'allRoutes' # e.g. if offerAds==TAS then we would only include ads that have a 'Tasman sale' message in the model
+offerAds <- 'TAS' # 'TAS', 'DOM', 'PI', 'LH', 'allRoutes' # e.g. if offerAds==TAS then we would only include ads that have a 'Tasman sale' message in the model
 layerAds <- 'all' # 'notRemarketing', 'Remarketing', or 'all'. If 'notRemarketing' then exclude RMK ads from model.
 groupAds <- 'all' # 'retail', 'brand', or 'all'. Az reckons we would only ever use the model to buy retail ads (i.e. ads relating to specific sales), but including other options for completeness (and may be required if there aren't enough convs just looking at retail & non-RMK).
-modelType <- 'lasso' # 'lasso', 'tree', or 'both'. Which type of model are we creating segments & saving outputs for? Lasso has better predictive performance, but can create segments with few or no users in them.
-compareModels <- 'N' # 'Y' or 'N'. apart from tree and lasso, do we want to run other common models (RF, logReg, SVM) to look at how well tree & lasso perform? Good to do, but takes a long time.
+modelType <- 'both' # 'lasso', 'tree', or 'both'. Which type of model are we creating segments & saving outputs for? Lasso has better predictive performance, but can create segments with few or no users in them.
+compareModels <- 'Y' # 'Y' or 'N'. apart from tree and lasso, do we want to run other common models (RF, logReg, SVM) to look at how well tree & lasso perform? Good to do, but takes a long time.
 varCategories <- c('responseVar', 'adCatVars', 'regionVars', 'timeVars') # responseVar, adCatVars, urlVars, deviceVars, regionVars, countryCodeVars, bidPriceVars, timeVars. # See bottom of BKMK 0 for which vars are included in each of these sets.
 CVMethod <- 'kFold' # 'kFold' or 'timeSlice'
 horizon=3
 initialWindow=35 # These params for timeSlice only. See http://stackoverflow.com/questions/30233144/time-series-splitting-data-using-the-timeslice-method for deets.
 maxDepthVec <- c(2, 3, 5, 6) # for final tree, what tree depths are we going to tune over? Maximum value here will determine max no. of segments.
-numLambdaSEs <- 5 # Affects strength of lasso feature selection. If using lasso, pick highest lambda that is within [numLambdaSEs] standard errors of best model. Common advice is that the best model within 1se is the best, but I've found this retains many features and heaps of segments. NB the code will output AUC values for best vs lambdaSE model, so can review how much worse the stronger feature selection makes the model.
+maxLassoPredictors <- 11 # Pick best model with constraint that can't be any more than X predictors. Get too many segments otherwise.
 liftThreshold <- 1.25 
 
 # Add in params used to read in data & poss name outputs - need to match names in Create model database script:
@@ -60,9 +59,10 @@ suppressMessages(library(caret))
 suppressMessages(library(glmnet))
 # suppressMessages(library(mlbench))
 suppressMessages(library(rattle)) # for nice tree plots
-library(partykit) # improved trees (vs party, which is used by caret)
-library(parallel)
-library(doParallel)
+suppressMessages(library(partykit)) # improved trees (vs party, which is used by caret)
+suppressMessages(library(parallel))
+suppressMessages(library(doParallel))
+suppressMessages(library(stabs))
 
 #+++++++++++++++++
 # Modify vars for modelling
@@ -294,12 +294,14 @@ if(compareModels=='Y'){
   mCTree <- train(Converter~., data=modelDF, method="ctree", trControl=control, metric='ROC')
   # mRTree <- train(Converter~., data=modelDF, method="rpart", trControl=control, metric='ROC')
   mRF <- train(Converter~., data=modelDF, method="rf", trControl=control, metric='ROC') # NB recommnedation for mtry param is mtry=floor(sqrt(ncol(x))) or mtry=7, see http://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
+  mGlmBoost <- train(Converter~., data=modelDF, method="glmboost", trControl=control, metric='ROC')
+  # mGAMBoost <- train(Converter~., data=modelDF, method="gamboost", trControl=control, metric='ROC') # error, which I haven't investigated. parking for now
   
   #+++++++++++++++++++
   # Compare predictive performance
   #+++++++++++++++++++
   
-  AUCs <- resamples(list(Glmnet = mGlmnet, SVMLinear = mSVMLinear, NNet=mNNet, RF=mRF, Ctree=mCTree))
+  AUCs <- resamples(list(Glmnet = mGlmnet, SVMLinear = mSVMLinear, RF=mRF, Ctree=mCTree, GlmBoost=mGlmBoost)) # , GAMBoost=mGAMBoost))
   windows()
   bwplot(AUCs) # log reg pretty good; glment slightly better
   graphics.off()
@@ -323,12 +325,71 @@ gc()
 
 #__________________________________________________________________________________________________________________________________
 
-#4 Feature selection methods -  try use GLMnet with lasso, modifying lambda to get different degrees of feature selection, then pick model with fewest features that is within Xse of best ----
+# TEMP Feature selection methods - stability selection with either mboost or lasso ----
+#__________________________________________________________________________________________________________________________________
+
+cat(' WARNING - using stability selection to select features *prior* to calculating model performance. Since the selection is not done within the resampling the AUC values for these methods will be optimistic\n')
+
+#+++++++++++++++++++
+# Lasso
+#+++++++++++++++++++
+
+stabLasso <- stabsel(x=select(modelDF, -Converter), y=modelDF$Converter, fitfun=glmnet.lasso, cutoff = 0.6, PFER = 1, args.fitfun=list(family='binomial'))
+stabLasso
+
+plot(stabLasso, main = "Lasso")
+selected(stabLasso)
+
+stabDF <- select(modelDF, Converter, adX_InternetAndTelecom, daypart)
+train(Converter~., data=stabDF, method="glmnet", trControl=control, metric='ROC') 
+  
+#+++++++++++++++++++
+# mBoost
+#+++++++++++++++++++
+
+mGlmboost <- glmboost(Converter ~ ., data=modelDF, family=Binomial()) # note weird family specification
+stabBoost <- stabsel(mGlmboost, q = 3, PFER = 1, sampling.type = "MB") # NOTE ALL CODE BELOW THO, THERE SHOULD BE EXTRA STEPS?
+stabBoost
+
+selected(stabBoost)
+
+stabDF2 <- select(modelDF, Converter, adX_InternetAndTelecom)
+train(Converter~., data=stabDF, method="glmboost") 
+
+  
+# Direct from package pdf:
+
+### using stability selection directly on computed boosting models
+### from mboost
+
+### low-dimensional example
+mod <- glmboost(DEXfat ~ ., data = bodyfat)
+
+## compute cutoff ahead of running stabsel to see if it is a sensible
+## parameter choice.
+## p = ncol(bodyfat) - 1 (= Outcome) + 1 ( = Intercept)
+stabsel_parameters(q = 3, PFER = 1, p = ncol(bodyfat) - 1 + 1, sampling.type = "MB")
+## the same:
+stabsel(mod, q = 3, PFER = 1, sampling.type = "MB", eval = FALSE)
+### Do not test the following code per default on CRAN as it takes some time to run:
+## now run stability selection
+(sbody <- stabsel(mod, q = 3, PFER = 1, sampling.type = "MB"))
+opar <- par(mai = par("mai") * c(1, 1, 1, 2.7))
+plot(sbody)
+par(opar)
+plot(sbody, type = "maxsel", ymargin = 6)
+
+  
+  
+  
+#__________________________________________________________________________________________________________________________________
+
+#4 Feature selection methods -  try use GLMnet with lasso, modifying lambda to get different degrees of feature selection, then pick best model with <X predictors ----
 # #__________________________________________________________________________________________________________________________________
 
 if(modelType=='lasso' | modelType=='both'){
  
-  cat(paste0('\n----Using lasso for feature selection - picking lasso model with highest lambda within ', numLambdaSEs, ' standard errors of best lasso to get maximum feature selection while still retaining a good model----\n\n'))
+  cat(paste0('\n----Using lasso for feature selection - picking best lasso model with <', maxLassoPredictors, ' predictors----\n\n'))
   
   ### Standard rule is the '1se rule'; see here https://sebastianraschka.com/blog/2016/model-evaluation-selection-part3.html. BUT too many segments result from this, so I'm going to go with 2se instead
   
@@ -379,36 +440,48 @@ if(modelType=='lasso' | modelType=='both'){
   #+++++++++++++++++++
   # Explore resampling results and look at model that needs fewest predictors while also being within Xse of best performing model
   #+++++++++++++++++++
-  
+
   # Use ggplot to find model with fewest predictors that is still <Xse from best model
   inputModel <- mGlmnet2
   seDF <- inputModel$results %>%
-    mutate(rocXSE_low = ROC-numLambdaSEs*(ROCSD/sqrt(inputModel$control$number*inputModel$control$repeats)),
-           rocXSE_high = ROC+numLambdaSEs*(ROCSD/sqrt(inputModel$control$number*inputModel$control$repeats)), # calculate std errors of resamples; see http://stats.stackexchange.com/questions/206139/is-there-a-way-to-return-the-standard-error-of-cross-validation-predictions-usin
+    mutate(roc1SE_low = ROC-1*(ROCSD/sqrt(inputModel$control$number*inputModel$control$repeats)),
+           roc1SE_high = ROC+1*(ROCSD/sqrt(inputModel$control$number*inputModel$control$repeats)), # calculate std errors of resamples; see http://stats.stackexchange.com/questions/206139/is-there-a-way-to-return-the-standard-error-of-cross-validation-predictions-usin
            modelPerformance='other')
   seDF$modelPerformance[which(seDF$ROC==max(seDF$ROC))] <- 'best'
-  seDF$withinXSEVec <- ifelse(seDF$rocXSE_high>=max(seDF$ROC) & seDF$modelPerformance!='best', 'y', 'n')
-  if(length(seDF$withinXSEVec[seDF$withinXSEVec=='y'])==0){ # in case no models are within XSE
-    seDF$modelPerformance[seDF$modelPerformance=='best'] <- paste0('bestAndFewestPredsWithin', numLambdaSEs, 'SE')
-  } else {
-    seDF$modelPerformance[which(seDF$lambda==max(seDF$lambda[seDF$withinXSEVec=='y']))] <- paste0('fewestPredsWithin', numLambdaSEs, 'SE')  
-  }
   seDF$numPreds <- sapply(seDF$lambda, function(x) {
     length(coef(inputModel$finalModel, s=x)[coef(inputModel$finalModel, s=x)[,1]!=0])})
 
+  seDF$lessThanXPredictors <- ifelse(seDF$numPreds<=maxLassoPredictors, 'y', 'n')
+  if(length(seDF$lessThanXPredictors[seDF$lessThanXPredictors=='y'])==0){ # in case no models are within XSE
+    cat(paste0(' WARNING - no models have less that ', maxLassoPredictors, ' predictors\n'))
+  } else {
+    seDF$modelPerformance[which(seDF$ROC==max(seDF$ROC[seDF$lessThanXPredictors=='y']))] <- paste0('bestWithMax', maxLassoPredictors, 'Preds')  
+  }
+  if(length(seDF$modelPerformance[seDF$modelPerformance=='best'])==0){
+    seDF$modelPerformance[grepl('bestWithMax', seDF$modelPerformance)] <- paste0('bestAndBestWithMax', maxLassoPredictors, 'Preds')  
+  }
+
   windows()
-  ggplot(seDF, aes(lambda, ROC, colour=modelPerformance)) + geom_point(size=2) +
-    geom_errorbar(aes(ymin=rocXSE_low, ymax=rocXSE_high), width=0) + ggtitle(paste0('ROC +/- ', numLambdaSEs, 'se'))
+  ggplot(seDF, aes(numPreds, ROC, colour=modelPerformance)) + geom_point(size=2) +
+    geom_errorbar(aes(ymin=roc1SE_low, ymax=roc1SE_high), width=0) + ggtitle(paste0('ROC +/- 1se'))
   graphics.off()
   
-  # find biggest lambda (i.e. fewest predictors) within 2se, & report no. of predictors excluded
+  # Report ROC for best model with <X preds
   bestLambda <- seDF$lambda[grepl('best', seDF$modelPerformance)]
-  grepl('[fF]ewestPredsWithin', seDF$modelPerformance)
-  highestLambda_withinXse <- seDF$lambda[grepl('[fF]ewestPredsWithin', seDF$modelPerformance)]
-  numPreds_bestModel=length(coef(inputModel$finalModel, s=bestLambda)[coef(inputModel$finalModel, s=bestLambda)!=0])
-  numPreds_within2se=length(coef(inputModel$finalModel, s=highestLambda_withinXse)[coef(inputModel$finalModel, s=highestLambda_withinXse)!=0])
+  bestLambda_lessThanXPreds <- seDF$lambda[grepl('[Bb]estWithMax', seDF$modelPerformance)]
+  if(length(seDF$modelPerformance[seDF$modelPerformance=='best'])>0){
+    numPreds_bestModel <- seDF$numPreds[seDF$modelPerformance=='best']
+    AUC_bestModel <- seDF$ROC[seDF$modelPerformance=='best']
+    numPreds_lessThanXPreds <- seDF$numPreds[grepl('bestWithMax', seDF$modelPerformance)]
+    AUC_lessThanXPreds <- seDF$ROC[grepl('bestWithMax', seDF$modelPerformance)]
+  } else { # need this one in case 'best' has been replaced with 'bestAndBestWithMax...'; i.e. the best model also has <X preds
+    numPreds_bestModel <- seDF$numPreds[grepl('bestAndBestWithMax', seDF$modelPerformance)]
+    AUC_bestModel <- seDF$ROC[grepl('bestAndBestWithMax', seDF$modelPerformance)]
+    numPreds_lessThanXPreds <- seDF$numPreds[grepl('bestAndBestWithMax', seDF$modelPerformance)]
+    AUC_lessThanXPreds <- seDF$ROC[grepl('bestAndBestWithMax', seDF$modelPerformance)]
+  }
   
-  cat(paste0(' Using lasso model whose performance is within ', numLambdaSEs, 'SE of best model for subsequent glmnet inference, to reduce no. of features in model.\n Best model has ',  numPreds_bestModel, ' predictors and AUC=', round(seDF$ROC[grepl('best', seDF$modelPerformance)], 2), '\n Simplest within ', numLambdaSEs, ' SE has ', numPreds_within2se, ' predictors and AUC=', round(seDF$ROC[grepl('[fF]ewestPredsWithin', seDF$modelPerformance)], 2), '\n'))
+  cat(paste0(' Using lasso model with best performance given less than ', maxLassoPredictors, ' predictors for subsequent glmnet inference.\n Best model has ',  numPreds_bestModel, ' predictors and AUC=', round(AUC_bestModel, 2), '\n Best with <', maxLassoPredictors, ' preds has ', numPreds_lessThanXPreds, ' predictors and AUC=', round(AUC_lessThanXPreds, 2), '\n'))
   # ==> model predictions from now on should use alpha=1, lambda=highestLambdaWithin2se
 }
 
@@ -563,42 +636,88 @@ gc()
 
 #__________________________________________________________________________________________________________________________________
 
-#6. For final **tree** model, tabulate segment rules, lift, and CPA, to give to media buyers [HASHING OUT - try using non-tree models instead; see below] ----
+#6. For final **tree** model, tabulate segment rules, lift, and CPA, to give to media buyers ----
 #__________________________________________________________________________________________________________________________________
 
 if(modelType=='tree' | modelType=='both'){
   
   cat('\n----Running final tree model and creating segments ----\n\n')
+
+  #__________________________________________________________________________________________________________________________________
   
-  #+++++++++++++++++++
-  # Rerun final model with partykit, after first potentially messing with mincriterion and maxdepth params to make a smaller tree for planners
-  #+++++++++++++++++++
+  #6.a. Define custom caret learner for partykit::ctree (gives better outputs) ----
+  #__________________________________________________________________________________________________________________________________
+  
+  # See here for details https://topepo.github.io/caret/using-your-own-model-in-train.html
+  
+  # Just have to pass a list to method argument containing the following elements (some are optional): 
+  names(getModelInfo(model = "ctree", regex = FALSE)[[1]])
+  # ==> i.e. instead of passing method="ctree" inside train, have to pass a list containing the same info as getModelInfo above, thusly: 'method=ctreePK'
+  
+  # create start of list - type, library, loop
+  ctreePK <- list(type='Classification', library='partykit', loop=NULL)
+  
+  # add in parameters element
+  ctreePK$parameters <- data.frame(parameter = c("mincriterion", "maxdepth"), # hyperparam argument names in the partykit function
+                                   class = rep("numeric", 2), # hyperparam classes
+                                   label = c("mincriterion", "maxdepth")) # labels used for caret outputs
+  
+  # add in the grid element
+  ctreePK$grid <- function(x, y, len=NULL, search="grid") {
+    if(search=="grid"){
+      # NB I don't use x, y, len... they are only important if the input data is used to define hyperparam values.
+      out <- expand.grid(mincriterion=c(0.1, 0.5, 0.95), maxdepth=c(3, 5, 10))
+      out} else {
+        y=y; x=x; out=1111}} # this one never gets used, but need to have x & y in function otherwise throws an error
+  
+  # add in the fit element - function that fits the model (i.e returns an output like 'lm(xxx)')
+  ctreePK$fit <- function(x, y, wts, param, lev, last, weights, classProbs, ...) { 
+    dat <- x
+    dat$.outcome <- y
+    partykit::ctree(as.formula(".outcome ~ ."), data=dat, # partykit requires a formula, c.f. 'x=..., y=...'
+                    mincriterion=param$mincriterion, maxdepth=param$maxdepth, ...)}
+  
+  # Add in predict element
+  ctreePK$predict <- function (modelFit, newdata, submodels = NULL) {
+    out <- predict(modelFit, newdata)
+    out}
+
+  # Prob element
+  ctreePK$prob <- function (modelFit, newdata, submodels = NULL) {
+    out <- predict(modelFit, newdata, type='prob')
+    row.names(out) <- NULL
+    out }
+  
+  # Levels element
+  ctreePK$levels <- function(x) x$fitted$`(response)` # response var levels. WARNING THIS METHOD WILL ONLY WORK IF BOTH LEVELS MAKE IT INTO FITTED OBJECT
+  
+  #__________________________________________________________________________________________________________________________________
+  
+  #6.b Train model and produce outputs ----
+  #__________________________________________________________________________________________________________________________________
   
   set.seed(1)
-  
+
+  # Set up parallel backend
+  cl <- makeCluster(detectCores()-1) # leave one core spare      * NB CARET AUTOMATICALLY DOES PARALLEL, IF BACKEND REGISTERED
+  registerDoParallel(cl)
+  getDoParWorkers() # check how many cores are getting used
+
   # Set up tuning grid
   grid <- expand.grid(mincriterion=c(0.1, seq(0.5, 0.99, 0.05), 0.99), maxdepth=maxDepthVec)
 
-  mCTree <- train(Converter~., data=modelDF, method="ctree2", trControl=control, tuneGrid=grid, metric='ROC')
-  cat(paste0(' Performance of final caret tree model: ROC=', round(mCTree$results$ROC, 2)[which.max(mCTree$results$ROC)], '; maxdepth=', mCTree$results$maxdepth[which.max(mCTree$results$ROC)], '; mincriterion=', mCTree$results$mincriterion[which.max(mCTree$results$ROC)], '. Note however that final model uses partykit; these maxdepth and mincriterion params get used but final model may still differ. Presumably ROC will be similar tho?\n'))
+  mCTree_PK <- train(x=select(modelDF, -Converter), y=modelDF$Converter,     # *** DONT USE DATA ARG HERE ***
+                      method=ctreePK, trControl=control, tuneGrid=grid)
   
-  # up/downsample as necessary, to match final caret tree, then run in partykit
-  convsDF <- filter(modelDF, Converter=='y')
-  nonconvsDF <- filter(modelDF, Converter=='n')
-  if(nrow(convsDF)<nrow(nonconvsDF)){
-    modelDF_manualDownsample <- bind_rows(convsDF, sample_n(nonconvsDF, size=nrow(convsDF))) 
-  } else { modelDF_manualDownsample <- bind_rows(nonconvsDF, sample_n(convsDF, size=nrow(nonconvsDF))) }
-  
-  mCTree_PK <- partykit::ctree(Converter~., data=modelDF_manualDownsample, maxdepth=mCTree$bestTune$maxdepth, mincriterion=mCTree$bestTune$mincriterion)
-    
   #+++++++++++++++++++
   # plot trees and save to file, if desired (but excel output below is better I think)
   #+++++++++++++++++++
-  
-  windows()
-  plot(mCTree_PK, gp = gpar(fontsize = 6), simplifiy=TRUE)
-  graphics.off()
-  # # save plots to file
+
+  # windows()
+  # plot(mCTree_PK$finalModel, gp = gpar(fontsize = 6), simplifiy=TRUE)
+  # graphics.off()
+
+    # # save plots to file
   # png(paste0(pathSave, 'exampleCTree1.png'), height=10000, width=10000, res=400)
   # plot(mCTree_PK, gp = gpar(fontsize = 6), simplifiy=TRUE)
   # graphics.off()
@@ -608,6 +727,12 @@ if(modelType=='tree' | modelType=='both'){
   #+++++++++++++++++
   
   treeModelToSummarise <- mCTree_PK
+  bestMincrit <- treeModelToSummarise$bestTune$mincriterion
+  bestMaxdepth <- treeModelToSummarise$bestTune$maxdepth
+  treeROC <- treeModelToSummarise$results$ROC[which.max(treeModelToSummarise$results$ROC)] # recorded for final outputs
+  treeModelToSummarise <- treeModelToSummarise$finalModel
+  
+cat(paste0(' Performance of final caret tree model: ROC=', round(treeROC, 2), '; maxdepth=', bestMaxdepth, '; mincriterion=', bestMincrit, '\n'))
   
   nodePredictions <- predict(treeModelToSummarise, type = "prob") # one row per instance, with row labels giving node and cell values giving prob of "y" and prob of "n"
   nodeLabels <- labels(nodePredictions)[[1]]
@@ -712,8 +837,7 @@ if(modelType=='tree' | modelType=='both'){
   print(head(as.data.frame(treeSummaryDF, 2)))
   print(tail(as.data.frame(treeSummaryDF, 2)))
   
-  write.csv(treeSummaryDF, file=paste0(pathSave, 'TREERESULTS_', outputDatabase, '_negativeInstanceDownsampling', negativeInstanceDownsampling, '_', dataset, 'DF_', route, '_offer', offerAds, '_group', groupAds, '_layer', layerAds, '_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '_approxAUC', round(mCTree$results$ROC, 2)[which.max(mCTree$results$ROC)], '.csv'), row.names=FALSE)
-  
+  write.csv(treeSummaryDF, file=paste0(pathSave, 'TREERESULTS_', outputDatabase, '_negativeInstanceDownsampling', negativeInstanceDownsampling, '_', dataset, 'DF_', route, '_offer', offerAds, '_group', groupAds, '_layer', layerAds, '_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '_AUC', round(treeROC, 2), '.csv'), row.names=FALSE)
   
   # #+++++++++++++++++++
   # # 6.ii. TEMP graphing distribution of costs per ad across segments based on best CTree model above]
@@ -756,14 +880,14 @@ if(modelType=='lasso' | modelType=='both'){
                           summaryFunction=twoClassSummary,
                           classProbs=TRUE,
                           sampling='down') # downsample within each resampling fold, then test on full holdout fold. https://topepo.github.io/caret/subsampling-for-class-imbalances.html for details
-  
+
   # Rerun model
-  mGlmnet3 <- train(Converter~., data=modelDF, method="glmnet", trControl=control2, metric='ROC', tuneGrid=expand.grid(alpha=1, lambda=highestLambda_withinXse))
+  mGlmnet3 <- train(Converter~., data=modelDF, method="glmnet", trControl=control2, metric='ROC', tuneGrid=expand.grid(alpha=1, lambda=bestLambda_lessThanXPreds))
   finalModel <- mGlmnet3
-  
+    
   # Get nonzero predictors from lasso model
-  coeffsDF <- data.frame(feature=row.names(coef(finalModel$finalModel, s=highestLambda_withinXse)),
-                         beta=unname(coef(finalModel$finalModel, s=highestLambda_withinXse))[,1]) # NB 'finalModel' at the moment is just caret's glmnet model, but run with alpha=1, definined in # 4.i
+  coeffsDF <- data.frame(feature=row.names(coef(finalModel$finalModel, s=bestLambda_lessThanXPreds)),
+                         beta=unname(coef(finalModel$finalModel, s=bestLambda_lessThanXPreds))[,1]) # NB 'finalModel' at the moment is just caret's glmnet model, but run with alpha=1, definined in # 4.i
   nonZeroFeaturesDF <- filter(coeffsDF, beta!=0)
   zeroFeaturesDF <- filter(coeffsDF, beta==0)
   tempNonZeroFeatures <- nonZeroFeaturesDF$feature
@@ -777,12 +901,12 @@ if(modelType=='lasso' | modelType=='both'){
   nonZeroFeatures <- as.character(nonZeroFeaturesDF$feature)
   zeroFeatures <- as.character(zeroFeaturesDF$feature)
   
-  cat(' Significant features used in final model (excludes significant factor levels that have a negative effect, cos theres no need to have these in our final segments since we only care about high-lift segments):\n')
-  print(nonZeroFeatures[!grepl('Intercept', nonZeroFeatures)])
-  cat(' Nonsignificant features removed from final model:\n')
-  print(zeroFeatures)
-  cat(' Significant factor levels with a negative effect that were removed from segments:\n')
-  print(as.character(tempNonZeroFeatures[!tempNonZeroFeatures %in% nonZeroFeatures]))
+  # cat(' Significant features used in final model (excludes significant factor levels that have a negative effect, cos theres no need to have these in our final segments since we only care about high-lift segments):\n')
+  # print(nonZeroFeatures[!grepl('Intercept', nonZeroFeatures)])
+  # cat(' Nonsignificant features removed from final model:\n')
+  # print(zeroFeatures)
+  # cat(' Significant factor levels with a negative effect that were removed from segments:\n')
+  # print(as.character(tempNonZeroFeatures[!tempNonZeroFeatures %in% nonZeroFeatures]))
   
   ### EXTRACT UNIQUE VALUES OF NON-ZERO PREDICTORS - (1) FOR NON-FACTORS
   
@@ -928,8 +1052,8 @@ if(modelType=='lasso' | modelType=='both'){
   df[,colnames(df)=='day'] <- matchDF_df$day
   
   cat(' WARNING - factor levels that were zeroed out by lasso belong to the same segment as the baseline level (i.e. they give identical predictions). Have manually combined these levels for region, day, and daypart, but will need to add in any new factors that get modelled\n')
-  
-  # Create an index for joining segmentID to df, based on concatentation of all nonzero predictors:
+
+# Create an index for joining segmentID to df, based on concatentation of all nonzero predictors:
   matchDF_df$joinID <- do.call(paste0, matchDF_df)
   matchDF_segments$joinID <- do.call(paste0, matchDF_segments)
   matchDF_segments$segmentID <- 1:nrow(matchDF_segments)
@@ -949,7 +1073,6 @@ if(modelType=='lasso' | modelType=='both'){
   warning('\n - numRows and cost variables per segment are calculated based on df  ***AFTER FILTERING AD CATEGORIES*** i.e. may be filtered by Layer, Offer, & Group depending on parameter values.\n   - Example: if route=TAS, offerAds=all, groupAds=Retail, & layerAds=notRemarketing, then CPA = [total adspend across retail, non-remarketing DBM ads advertising any route] / [no. of retail, non-remarketing DBM ads advertising any route that were attributed a TAS conversion]\n')
   
   # NB following code is based on df, which has already been filtered to remove ads that don't match group, offer, and layer criteria
-  
   summaryDF <- df %>%
     group_by(segmentID) %>%
     summarise(numConversions=length(Converter[Converter=='y']),
@@ -963,7 +1086,7 @@ if(modelType=='lasso' | modelType=='both'){
               medianRevenueNZD=medianDBMRevenueAdvertiserCurrencyCPM,
               IQRRevenueNZD=paste0(lowerQuartileDBMRevenueAdvertiserCurrencyCPM, '-', upperQuartileDBMRevenueAdvertiserCurrencyCPM),
               meanRevenueNZD=meanDBMRevenueAdvertiserCurrencyCPM)
-  
+
   warning('Could split out cost into weighted average based on converter vs nonconv cost, if worthwhile. Did notice that for some segments converter costs were more than nonconv costs, so could be worth doing. ***ALSO SUGGESTS THERES SOME IMPORTANT VAR IM NOT MODELLING - OR AT LEAST SOME VAR THAT SIGNIFICANTLY INFLUENCES PRICE. E.g. Video vs banner ads***\n')
   
   sum(summaryDF$numRows) # sanity check on number of rows - should be around 8million per month of data.
@@ -1010,11 +1133,11 @@ if(modelType=='lasso' | modelType=='both'){
   # Save to file
   #+++++++++++++++++++
   
-  cat(' Final output:\n')
+  cat(' Final lasso output:\n')
   print(head(summaryDF, 2))
   print(tail(summaryDF, 2))
   
-  write.csv(summaryDF, file=paste0(pathSave, 'LASSORESULTS_', outputDatabase, '_negativeInstanceDownsampling', negativeInstanceDownsampling, '_', dataset, 'DF_', route, '_offer', offerAds, '_group', groupAds, '_layer', layerAds, '_', numLambdaSEs, 'lambdaSEs_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '.csv'), row.names=FALSE)
+  write.csv(summaryDF, file=paste0(pathSave, 'LASSORESULTS_', outputDatabase, '_negativeInstanceDownsampling', negativeInstanceDownsampling, '_', dataset, 'DF_', route, '_offer', offerAds, '_group', groupAds, '_layer', layerAds, '_', maxLassoPredictors, 'lambdaSEs_', gsub('-', '', firstDate), '-', gsub('-', '', maxDate), '_AUC', round(AUC_lessThanXPreds, 2), '.csv'), row.names=FALSE)
   }
   
 warning('Need to make sure models dont have numeric variables - at least if Im using non-tree models to make segments out of all combinations of variables (there are infinite possible combinations for continuous vars). If I do add in numerics, will need to use tree models I think, and also poss normalise/scale before modelling\n')
